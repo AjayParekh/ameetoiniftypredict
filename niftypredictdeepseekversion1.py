@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import datetime as dt_mod
 import os
 import pytz
@@ -91,6 +91,7 @@ st.markdown("""
     .weak-bullish { background: linear-gradient(135deg, #2d6a4f 0%, #52b788 100%); }
     .weak-bearish { background: linear-gradient(135deg, #7b2d00 0%, #c05c2a 100%); }
     .neutral  { background: linear-gradient(135deg, #2c3e50 0%, #4ca1af 100%); }
+    .no-data  { background: linear-gradient(135deg, #5c5c5c 0%, #8a8a8a 100%); }
     .price-large { font-size: 2.8rem; font-weight: 800; margin: 10px 0; }
     .move-text { font-size: 1.5rem; font-weight: 600; margin-bottom: 10px; opacity: 0.9; }
     .sl-badge  { font-size: 1.2rem; font-weight: 700; background: rgba(0,0,0,0.2);
@@ -131,60 +132,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-
-url = 'https://api.upstox.com/v2/market/oi'
-params = {
-    'instrument_key': 'NSE_INDEX|Nifty 50',
-    'expiry': '2026-06-30',
-    'date': '2026-06-26'
-}
-headers = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Authorization': 'Bearer eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMDM2NjciLCJqdGkiOiI2OWQyMzJlMWNjZDUyZDRjZDQzMzc5NjYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc3NTM4MzI2NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODA2OTYyNDAwfQ.VFRZ5NP87NM1Vyn4-bCB2FAvanu4wsueNHo_POQtPv8'
-}
-
-upstoxResponse = requests.get(url, params=params, headers=headers)
-
-upstoxResponse = json.loads(upstoxResponse.text)
-data = upstoxResponse["data"]
-print("----------upstoxResponse ---------", data)
-
-
-
-st.write(f"Status: {upstoxResponse['status']}")
-st.write(f"Total Puts: {data['total_puts']}")
-st.write(f"Total Calls: {data['total_calls']}")
-st.write(f"Spot Closing Price: {data['spot_closing_price']}")
-st.write(f"Expiry: {data['expiry']}")
-
-st.subheader("OI by Strike Price")
-
-# Display as a table
-oi_rows = [
-    {
-        "Strike Price": item["strike_price"],
-        "Call OI": item["call_oi"],
-        "Put OI": item["put_oi"],
-        "HIGH OI": "HIGH PUT" if item["put_oi"] > item["call_oi"] else "HIGH CALL",
-        "OI Difference": abs(item["put_oi"] - item["call_oi"]),
-    }
-    for item in data["call_put_oi_data_list"]
-]
-
-top_20 = pd.DataFrame(oi_rows).sort_values(
-    by="OI Difference",
-    ascending=False
-).head(20).reset_index(drop=True)
-
-# IMPROVED HIGHLIGHT: golden background for top 5
-def highlight_top5(row):
-    if row.name < 5:
-        return ["background-color: #ffd700; font-weight: bold; color: #000000;"] * len(row)
-    return [""] * len(row)
-
-st.dataframe(top_20.style.apply(highlight_top5, axis=1))
-
 # ==============================
 # GLOBAL CONFIG & TIMING
 # ==============================
@@ -199,11 +146,101 @@ trade_file = "Paper_Trades.csv"
 excel_file = "Market_Data.xlsx"
 
 # ==============================
+# CODE 3 — OI / UPSTOX CONFIG (REWRITTEN SECTION)
+# ==============================
+# Token now comes from Streamlit secrets, never hardcoded in source.
+# Add this to your Streamlit Cloud app secrets (Settings -> Secrets):
+#
+#   UPSTOX_TOKEN = "eyJ0eXAiOiJKV1Qi..."
+#
+UPSTOX_TOKEN = st.secrets.get("UPSTOX_TOKEN", None)
+UPSTOX_OI_URL = "https://api.upstox.com/v2/market/oi"
+NIFTY_INSTRUMENT_KEY = "NSE_INDEX|Nifty 50"
+
+
+def get_nearest_weekly_expiry(reference_dt):
+    """
+    Computes the nearest upcoming Nifty weekly options expiry (Thursday).
+    If 'today' is already Thursday but past market close (15:30 IST),
+    rolls forward to next week's Thursday.
+
+    NOTE: This does not account for exchange holiday-shifted expiries
+    (e.g. expiry moved to Wednesday due to a Thursday holiday). If NSE
+    shifts an expiry, override manually via the sidebar date input below.
+    """
+    days_ahead = (3 - reference_dt.weekday()) % 7  # Thursday == weekday() 3
+    candidate = reference_dt + timedelta(days=days_ahead)
+
+    market_close = dt_mod.time(15, 30)
+    if days_ahead == 0 and reference_dt.time() > market_close:
+        candidate = candidate + timedelta(days=7)
+
+    return candidate.date()
+
+
+def fetch_oi_data(expiry_date_str, trade_date_str, token):
+    """
+    Fetches option chain OI data from Upstox.
+    Returns (data_dict, error_message). On any failure, data_dict is None
+    and error_message explains why, so the caller can render a graceful
+    fallback instead of crashing the whole app.
+    """
+    if not token:
+        return None, "UPSTOX_TOKEN not found in Streamlit secrets."
+
+    params = {
+        "instrument_key": NIFTY_INSTRUMENT_KEY,
+        "expiry": expiry_date_str,
+        "date": trade_date_str,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+
+    try:
+        resp = requests.get(UPSTOX_OI_URL, params=params, headers=headers, timeout=8)
+    except requests.exceptions.RequestException as e:
+        return None, f"Network error reaching Upstox: {e}"
+
+    if resp.status_code != 200:
+        return None, f"Upstox returned HTTP {resp.status_code}: {resp.text[:200]}"
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None, "Upstox response was not valid JSON."
+
+    if payload.get("status") != "success":
+        return None, f"Upstox status was '{payload.get('status')}', not 'success'."
+
+    inner = payload.get("data")
+    if not inner or not inner.get("call_put_oi_data_list"):
+        return None, "Upstox returned no OI rows for this expiry/date (market closed, holiday, or wrong contract)."
+
+    return inner, None
+
+
+# Sidebar override in case the auto-picked Thursday is wrong (holiday shift, etc.)
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("#### 📅 Code 3 — Option Chain Expiry")
+    auto_expiry = get_nearest_weekly_expiry(now)
+    expiry_override = st.date_input(
+        "Expiry date (auto-picked, override if NSE shifted it)",
+        value=auto_expiry,
+        key="oi_expiry_override",
+    )
+    expiry_str = expiry_override.strftime("%Y-%m-%d")
+
+oi_raw_data, oi_fetch_error = fetch_oi_data(expiry_str, today, UPSTOX_TOKEN)
+
+# ==============================
 # GITHUB API CONFIGURATION
 # ==============================
-# GITHUB_TOKEN = st.secrets.get("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", None)
-GITHUB_TOKEN = "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"
-REPO_NAME = "AjayParekh/niftypredictiondeepseekversion1"
+GITHUB_TOKEN = st.secrets.get("GH_TOKEN", None)
+REPO_NAME = "AjayParekh/cloadtetingfornifty"  # matches your active automated repo
 FILE_PATH = "Paper_Trades.csv"
 
 def save_to_github(dataframe, filename=FILE_PATH, repo_name=REPO_NAME, token=GITHUB_TOKEN):
@@ -319,7 +356,7 @@ def fetch_master_data(symbol_dict):
         return symbol_dict, None
 
 # ==============================
-# ENHANCED PREDICTION FUNCTIONS
+# ENHANCED PREDICTION FUNCTIONS  (CODE 1 — UNTOUCHED)
 # ==============================
 
 def detect_domestic_pressure(nifty_change_pct, sgx_pct, gift_pct, nifty_price, nifty_prev_close):
@@ -435,21 +472,27 @@ def calculate_confidence_score(weighted_pcts, vix_value, nifty_change_pct, press
     return 0
 
 # ==============================
-# NEW CODE 3 – OI BASED PREDICTOR
+# CODE 3 – OI BASED PREDICTOR (REWRITTEN: bug fixes + safety)
 # ==============================
 
 def compute_max_pain(oi_data, spot):
+    """
+    Fixed: the loop variable used to be named 'st', shadowing the
+    Streamlit module import for the duration of this function. Renamed
+    to 'strike_k' so it can never collide with st.* calls if this
+    function is ever extended.
+    """
     strikes = [item["strike_price"] for item in oi_data]
     best_strike = strikes[0]
     min_pain = float('inf')
     for s in strikes:
         total = 0.0
         for item in oi_data:
-            st = item["strike_price"]
+            strike_k = item["strike_price"]
             call_oi = item["call_oi"]
             put_oi = item["put_oi"]
             # intrinsic value at strike s
-            total += call_oi * max(s - st, 0) + put_oi * max(st - s, 0)
+            total += call_oi * max(s - strike_k, 0) + put_oi * max(strike_k - s, 0)
         if total < min_pain:
             min_pain = total
             best_strike = s
@@ -607,7 +650,7 @@ for s, res in results:
 st.sidebar.write(f"**Nifty Prev Close:** {nifty_prev_close:,.2f}")
 
 # ==============================
-# ENHANCED CODE 1 — CALCULATIONS
+# ENHANCED CODE 1 — CALCULATIONS (UNTOUCHED)
 # ==============================
 
 # Calculate Nifty change metrics
@@ -694,7 +737,7 @@ if not is_achieved_c1 and nifty_price > 0:
         is_achieved_c1, status_c1 = True, "Achieved"
 
 # ==============================
-# ENHANCED CODE 2 — SIGNAL ENGINE
+# ENHANCED CODE 2 — SIGNAL ENGINE (UNTOUCHED)
 # ==============================
 def compute_signal_score_enhanced(trigger_pcts, china_pct, sgx_pct, vix_val, usdinr_pct, 
                                  hangseng_pct, nifty_change_pct, pressure_type, momentum_label):
@@ -858,7 +901,7 @@ else:
     card_class_c2 = "neutral"
 
 # ==============================
-# DIVERGENCE DETECTION (ENHANCED)
+# DIVERGENCE DETECTION (UNTOUCHED)
 # ==============================
 divergence_detected = False
 divergence_msg = ""
@@ -897,7 +940,7 @@ box2_badge = (
 )
 
 # ==============================
-# PAPER TRADE ENGINE (GITHUB DRIVEN)
+# PAPER TRADE ENGINE (GITHUB DRIVEN) (UNTOUCHED)
 # ==============================
 if now.time().hour == 14 and now.time().minute == 0 and prediction_c2 != "NEUTRAL":
     strike = (round(nifty_price / 50) * 50) + (-100 if prediction_c2 == "BULLISH" else 100)
@@ -948,6 +991,12 @@ if divergence_detected:
     st.markdown(f'<div class="divergence-alert">{divergence_msg}</div>', unsafe_allow_html=True)
 if vix_warning:
     st.markdown(f'<div class="vix-alert">{vix_warning}</div>', unsafe_allow_html=True)
+if oi_fetch_error:
+    st.markdown(
+        f'<div class="vix-alert">⚠️ Code 3 (OI Predictor) unavailable: {oi_fetch_error} '
+        f'— Code 1 and Code 2 are unaffected.</div>',
+        unsafe_allow_html=True
+    )
 
 # Enhanced indicator pills with momentum
 def pill(label, value, pct, invert=False):
@@ -987,19 +1036,26 @@ elif "BUYING" in pressure_type:
     st.success(f"✅ Domestic Buying Pressure Detected (Score: {pressure_score:.1f})")
 
 # ==============================
-# CODE 3 – OI BASED PREDICTOR (NEW)
+# CODE 3 — OI based predictor: compute signal only if data fetched OK
 # ==============================
-oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price)
+oi_signal = None
+if oi_raw_data is not None:
+    try:
+        oi_signal = compute_oi_signal(oi_raw_data["call_put_oi_data_list"], nifty_price)
+    except Exception as e:
+        oi_fetch_error = f"OI signal computation failed: {e}"
+        oi_signal = None
 
-# Determine card styling for OI
-if oi_signal["direction"] == "BULLISH":
-    oi_card_class = "bullish" if oi_signal["confidence"] > 70 else "weak-bullish"
-elif oi_signal["direction"] == "BEARISH":
-    oi_card_class = "bearish" if oi_signal["confidence"] > 70 else "weak-bearish"
+if oi_signal:
+    if oi_signal["direction"] == "BULLISH":
+        oi_card_class = "bullish" if oi_signal["confidence"] > 70 else "weak-bullish"
+    elif oi_signal["direction"] == "BEARISH":
+        oi_card_class = "bearish" if oi_signal["confidence"] > 70 else "weak-bearish"
+    else:
+        oi_card_class = "neutral"
 else:
-    oi_card_class = "neutral"
+    oi_card_class = "no-data"
 
-# NOW CREATE THREE COLUMNS
 top_cols = st.columns(3)
 
 with top_cols[0]:
@@ -1058,30 +1114,44 @@ with top_cols[1]:
 
 with top_cols[2]:
     st.subheader("📊 Code 3 — OI Open Interest")
-    st.markdown(f"""
-        <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
-            <div class="status-badge">OI SIGNAL</div>
-            <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
-            <div style="margin:6px 0; font-size:1.1rem;">
-                Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp;
-                PCR: {oi_signal['pcr']:.2f}
+    if oi_signal:
+        st.markdown(f"""
+            <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
+                <div class="status-badge">OI SIGNAL</div>
+                <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
+                <div style="margin:6px 0; font-size:1.1rem;">
+                    Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp;
+                    PCR: {oi_signal['pcr']:.2f}
+                </div>
+                <div class="price-large" style="font-size:2.1rem; margin:6px 0;">
+                    Target: {oi_signal['target']:,.2f}
+                </div>
+                <div style="font-size:1rem; margin-bottom:5px;">
+                    Support: {oi_signal['support']:,.2f} &nbsp;|&nbsp;
+                    Resistance: {oi_signal['resistance']:,.2f}
+                </div>
+                <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">
+                    STOP: {oi_signal['stop_loss']:,.2f}
+                </div>
+                <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">
+                    Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']}
+                    &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%
+                </div>
             </div>
-            <div class="price-large" style="font-size:2.1rem; margin:6px 0;">
-                Target: {oi_signal['target']:,.2f}
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+            <div class="prediction-card no-data" style="min-height:240px; padding:20px;">
+                <div class="status-badge">NO DATA</div>
+                <h2 style="margin:0; font-size:1.6rem;">OI Data Unavailable</h2>
+                <p style="font-size:0.9rem; margin-top:10px; opacity:0.9;">
+                    {oi_fetch_error or "Waiting for option chain data."}
+                </p>
+                <p style="font-size:0.8rem; margin-top:12px; opacity:0.75;">
+                    Expiry attempted: {expiry_str}
+                </p>
             </div>
-            <div style="font-size:1rem; margin-bottom:5px;">
-                Support: {oi_signal['support']:,.2f} &nbsp;|&nbsp;
-                Resistance: {oi_signal['resistance']:,.2f}
-            </div>
-            <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">
-                STOP: {oi_signal['stop_loss']:,.2f}
-            </div>
-            <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">
-                Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']}
-                &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
 with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", expanded=False):
     st.markdown("**Enhanced Code 2 factor-by-factor breakdown:**")
@@ -1097,6 +1167,9 @@ with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", 
         st.info("China market hasn't closed yet (12:30 PM IST). Code 2 signal will activate after that.")
     if "STRONG" in momentum_label and abs(nifty_change_pct) > 0.5:
         st.success(f"🚀 Strong momentum ({momentum_label}: {momentum_pct:+.2f}%) overrode signal threshold")
+    if oi_fetch_error:
+        st.markdown("**Code 3 (OI) status:**")
+        st.warning(f"⚠️ {oi_fetch_error}")
 
 if volatility_alerts:
     items = "".join([f"<li>{a}</li>" for a in volatility_alerts])
