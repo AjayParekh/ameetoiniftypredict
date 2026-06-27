@@ -1,13 +1,16 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 import datetime as dt_mod
 import os
 import pytz
 from streamlit_autorefresh import st_autorefresh
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
+from github import Github, GithubException
+import base64
+from io import StringIO
 import warnings
 warnings.filterwarnings('ignore')
 import requests
@@ -88,7 +91,6 @@ st.markdown("""
     .weak-bullish { background: linear-gradient(135deg, #2d6a4f 0%, #52b788 100%); }
     .weak-bearish { background: linear-gradient(135deg, #7b2d00 0%, #c05c2a 100%); }
     .neutral  { background: linear-gradient(135deg, #2c3e50 0%, #4ca1af 100%); }
-    .no-data  { background: linear-gradient(135deg, #5c5c5c 0%, #8a8a8a 100%); }
     .price-large { font-size: 2.8rem; font-weight: 800; margin: 10px 0; }
     .move-text { font-size: 1.5rem; font-weight: 600; margin-bottom: 10px; opacity: 0.9; }
     .sl-badge  { font-size: 1.2rem; font-weight: 700; background: rgba(0,0,0,0.2);
@@ -129,6 +131,60 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+
+url = 'https://api.upstox.com/v2/market/oi'
+params = {
+    'instrument_key': 'NSE_INDEX|Nifty 50',
+    'expiry': '2026-06-30',
+    'date': '2026-06-26'
+}
+headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': 'Bearer eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMDM2NjciLCJqdGkiOiI2OWQyMzJlMWNjZDUyZDRjZDQzMzc5NjYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc3NTM4MzI2NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODA2OTYyNDAwfQ.VFRZ5NP87NM1Vyn4-bCB2FAvanu4wsueNHo_POQtPv8'
+}
+
+upstoxResponse = requests.get(url, params=params, headers=headers)
+
+upstoxResponse = json.loads(upstoxResponse.text)
+data = upstoxResponse["data"]
+print("----------upstoxResponse ---------", data)
+
+
+
+st.write(f"Status: {upstoxResponse['status']}")
+st.write(f"Total Puts: {data['total_puts']}")
+st.write(f"Total Calls: {data['total_calls']}")
+st.write(f"Spot Closing Price: {data['spot_closing_price']}")
+st.write(f"Expiry: {data['expiry']}")
+
+st.subheader("OI by Strike Price")
+
+# Display as a table
+oi_rows = [
+    {
+        "Strike Price": item["strike_price"],
+        "Call OI": item["call_oi"],
+        "Put OI": item["put_oi"],
+        "HIGH OI": "HIGH PUT" if item["put_oi"] > item["call_oi"] else "HIGH CALL",
+        "OI Difference": abs(item["put_oi"] - item["call_oi"]),
+    }
+    for item in data["call_put_oi_data_list"]
+]
+
+top_20 = pd.DataFrame(oi_rows).sort_values(
+    by="OI Difference",
+    ascending=False
+).head(20).reset_index(drop=True)
+
+# IMPROVED HIGHLIGHT: golden background for top 5
+def highlight_top5(row):
+    if row.name < 5:
+        return ["background-color: #ffd700; font-weight: bold; color: #000000;"] * len(row)
+    return [""] * len(row)
+
+st.dataframe(top_20.style.apply(highlight_top5, axis=1))
+
 # ==============================
 # GLOBAL CONFIG & TIMING
 # ==============================
@@ -139,103 +195,51 @@ today = now.strftime("%Y-%m-%d")
 
 CHINA_CLOSE_TIME = time(12, 30)
 is_after_china = now.time() >= CHINA_CLOSE_TIME
+trade_file = "Paper_Trades.csv"
+excel_file = "Market_Data.xlsx"
 
 # ==============================
-# CODE 3 — OI / UPSTOX CONFIG (REWRITTEN SECTION)
+# GITHUB API CONFIGURATION
 # ==============================
-# Token now comes from Streamlit secrets, never hardcoded in source.
-# Add this to your Streamlit Cloud app secrets (Settings -> Secrets):
-#
-#   UPSTOX_TOKEN = "eyJ0eXAiOiJKV1Qi..."
-#
-UPSTOX_TOKEN = st.secrets.get("eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMDM2NjciLCJqdGkiOiI2OWQyMzJlMWNjZDUyZDRjZDQzMzc5NjYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc3NTM4MzI2NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODA2OTYyNDAwfQ.VFRZ5NP87NM1Vyn4-bCB2FAvanu4wsueNHo_POQtPv8", None)
-UPSTOX_OI_URL = "https://api.upstox.com/v2/market/oi"
-NIFTY_INSTRUMENT_KEY = "NSE_INDEX|Nifty 50"
+# GITHUB_TOKEN = st.secrets.get("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", None)
+GITHUB_TOKEN = "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"
+REPO_NAME = "AjayParekh/niftypredictiondeepseekversion1"
+FILE_PATH = "Paper_Trades.csv"
 
-
-def get_nearest_weekly_expiry(reference_dt):
-    """
-    Computes the nearest upcoming Nifty weekly options expiry (Thursday).
-    If 'today' is already Thursday but past market close (15:30 IST),
-    rolls forward to next week's Thursday.
-
-    NOTE: This does not account for exchange holiday-shifted expiries
-    (e.g. expiry moved to Wednesday due to a Thursday holiday). If NSE
-    shifts an expiry, override manually via the sidebar date input below.
-    """
-    days_ahead = (3 - reference_dt.weekday()) % 7  # Thursday == weekday() 3
-    candidate = reference_dt + timedelta(days=days_ahead)
-
-    market_close = dt_mod.time(15, 30)
-    if days_ahead == 0 and reference_dt.time() > market_close:
-        candidate = candidate + timedelta(days=7)
-
-    return candidate.date()
-
-
-def fetch_oi_data(expiry_date_str, trade_date_str, token):
-    """
-    Fetches option chain OI data from Upstox.
-    Returns (data_dict, error_message). On any failure, data_dict is None
-    and error_message explains why, so the caller can render a graceful
-    fallback instead of crashing the whole app.
-    """
+def save_to_github(dataframe, filename=FILE_PATH, repo_name=REPO_NAME, token=GITHUB_TOKEN):
     if not token:
-        return None, "UPSTOX_TOKEN not found in Streamlit secrets."
-
-    params = {
-        "instrument_key": NIFTY_INSTRUMENT_KEY,
-        "expiry": expiry_date_str,
-        "date": trade_date_str,
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
-
+        dataframe.to_csv(filename, index=False)
+        return
     try:
-        resp = requests.get(UPSTOX_OI_URL, params=params, headers=headers, timeout=8)
-    except requests.exceptions.RequestException as e:
-        return None, f"Network error reaching Upstox: {e}"
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        csv_content = dataframe.to_csv(index=False)
+        try:
+            contents = repo.get_contents(filename)
+            repo.update_file(contents.path, f"Update trade log {datetime.now().strftime('%Y-%m-%d %H:%M')}", csv_content, contents.sha)
+        except GithubException as e:
+            if e.status == 404:
+                repo.create_file(filename, "Initial trade log commit", csv_content)
+            else:
+                raise e
+    except Exception as e:
+        st.sidebar.error(f"GitHub Sync Failed: {e}")
 
-    if resp.status_code != 200:
-        return None, f"Upstox returned HTTP {resp.status_code}: {resp.text[:200]}"
-
+def load_from_github(filename=FILE_PATH, repo_name=REPO_NAME, token=GITHUB_TOKEN):
+    if not token:
+        if os.path.exists(filename):
+            return pd.read_csv(filename)
+        return pd.DataFrame()
     try:
-        payload = resp.json()
-    except ValueError:
-        return None, "Upstox response was not valid JSON."
-
-    if payload.get("status") != "success":
-        return None, f"Upstox status was '{payload.get('status')}', not 'success'."
-
-    inner = payload.get("data")
-    if not inner or not inner.get("call_put_oi_data_list"):
-        return None, "Upstox returned no OI rows for this expiry/date (market closed, holiday, or wrong contract)."
-
-    return inner, None
-
-
-# Sidebar override in case the auto-picked Thursday is wrong (holiday shift, etc.)
-with st.sidebar:
-    st.markdown("---")
-    st.markdown("#### 📅 Code 3 — Option Chain Expiry")
-    auto_expiry = get_nearest_weekly_expiry(now)
-    expiry_override = st.date_input(
-        "Expiry date (auto-picked, override if NSE shifted it)",
-        value=auto_expiry,
-        key="oi_expiry_override",
-    )
-    expiry_str = expiry_override.strftime("%Y-%m-%d")
-
-oi_raw_data, oi_fetch_error = fetch_oi_data(expiry_str, today, UPSTOX_TOKEN)
-
-# ==============================
-# (GitHub-based paper trade persistence removed per request —
-#  this app is now pure live prediction display, no trade logging,
-#  no GitHub read/write, no secrets needed for this part.)
-# ==============================
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        contents = repo.get_contents(filename)
+        decoded = base64.b64decode(contents.content).decode('utf-8')
+        return pd.read_csv(StringIO(decoded))
+    except Exception:
+        if os.path.exists(filename):
+            return pd.read_csv(filename)
+        return pd.DataFrame()
 
 # ==============================
 # SIDEBAR
@@ -271,6 +275,11 @@ with st.sidebar:
         st.sidebar.success("China Logic: ACTIVE")
     else:
         st.sidebar.warning("Waiting for 12:30 PM IST")
+
+    if st.sidebar.button("🗑️ Reset All Logs"):
+        if os.path.exists(trade_file): os.remove(trade_file)
+        save_to_github(pd.DataFrame())
+        st.rerun()
 
 # ==============================
 # MASTER INSTRUMENT LIST
@@ -310,7 +319,7 @@ def fetch_master_data(symbol_dict):
         return symbol_dict, None
 
 # ==============================
-# ENHANCED PREDICTION FUNCTIONS  (CODE 1 — UNTOUCHED)
+# ENHANCED PREDICTION FUNCTIONS
 # ==============================
 
 def detect_domestic_pressure(nifty_change_pct, sgx_pct, gift_pct, nifty_price, nifty_prev_close):
@@ -426,27 +435,21 @@ def calculate_confidence_score(weighted_pcts, vix_value, nifty_change_pct, press
     return 0
 
 # ==============================
-# CODE 3 – OI BASED PREDICTOR (REWRITTEN: bug fixes + safety)
+# NEW CODE 3 – OI BASED PREDICTOR
 # ==============================
 
 def compute_max_pain(oi_data, spot):
-    """
-    Fixed: the loop variable used to be named 'st', shadowing the
-    Streamlit module import for the duration of this function. Renamed
-    to 'strike_k' so it can never collide with st.* calls if this
-    function is ever extended.
-    """
     strikes = [item["strike_price"] for item in oi_data]
     best_strike = strikes[0]
     min_pain = float('inf')
     for s in strikes:
         total = 0.0
         for item in oi_data:
-            strike_k = item["strike_price"]
+            st = item["strike_price"]
             call_oi = item["call_oi"]
             put_oi = item["put_oi"]
             # intrinsic value at strike s
-            total += call_oi * max(s - strike_k, 0) + put_oi * max(strike_k - s, 0)
+            total += call_oi * max(s - st, 0) + put_oi * max(st - s, 0)
         if total < min_pain:
             min_pain = total
             best_strike = s
@@ -604,7 +607,7 @@ for s, res in results:
 st.sidebar.write(f"**Nifty Prev Close:** {nifty_prev_close:,.2f}")
 
 # ==============================
-# ENHANCED CODE 1 — CALCULATIONS (UNTOUCHED)
+# ENHANCED CODE 1 — CALCULATIONS
 # ==============================
 
 # Calculate Nifty change metrics
@@ -671,18 +674,27 @@ else:
 if "override" in override_note.lower() and "No override" not in override_note:
     pred_text_c1 = f"{pred_text_c1} {override_note}"
 
-# Status tracking (live calculation only — no file persistence)
+# Status tracking
 status_c1 = "Pending"
 is_achieved_c1 = False
+if os.path.exists(excel_file):
+    try:
+        hdf = pd.read_excel(excel_file)
+        hits = hdf[(hdf["Date"] == today) &
+                   (hdf["Instrument"] == "NIFTY 50") &
+                   (hdf["Status"] == "Achieved")]
+        if not hits.empty:
+            is_achieved_c1, status_c1 = True, "Achieved"
+    except: pass
 
-if nifty_price > 0:
+if not is_achieved_c1 and nifty_price > 0:
     if sentiment_score_c1 > 0.01 and nifty_price >= target_price_c1:
         is_achieved_c1, status_c1 = True, "Achieved"
     elif sentiment_score_c1 < -0.01 and nifty_price <= target_price_c1:
         is_achieved_c1, status_c1 = True, "Achieved"
 
 # ==============================
-# ENHANCED CODE 2 — SIGNAL ENGINE (UNTOUCHED)
+# ENHANCED CODE 2 — SIGNAL ENGINE
 # ==============================
 def compute_signal_score_enhanced(trigger_pcts, china_pct, sgx_pct, vix_val, usdinr_pct, 
                                  hangseng_pct, nifty_change_pct, pressure_type, momentum_label):
@@ -846,7 +858,7 @@ else:
     card_class_c2 = "neutral"
 
 # ==============================
-# DIVERGENCE DETECTION (UNTOUCHED)
+# DIVERGENCE DETECTION (ENHANCED)
 # ==============================
 divergence_detected = False
 divergence_msg = ""
@@ -885,9 +897,46 @@ box2_badge = (
 )
 
 # ==============================
-# (Paper trade engine removed per request — Code 1/2/3 are now
-#  display-only predictors with no trade logging or persistence.)
+# PAPER TRADE ENGINE (GITHUB DRIVEN)
 # ==============================
+if now.time().hour == 14 and now.time().minute == 0 and prediction_c2 != "NEUTRAL":
+    strike = (round(nifty_price / 50) * 50) + (-100 if prediction_c2 == "BULLISH" else 100)
+    opt_type = "CE" if prediction_c2 == "BULLISH" else "PE"
+    trade_row = pd.DataFrame({
+        "Date": [now.strftime("%Y-%m-%d")], "Time": ["14:00"],
+        "Signal": [prediction_c2], "Strength": [signal_strength],
+        "Score": [f"{score_c2}/5"],
+        "Strike": [f"{strike} {opt_type}"], "Entry": [nifty_price],
+        "Exit": [0.0], "PnL": [0.0], "Status": ["OPEN"],
+        "Expected_Move_Pts": [round(points_move_c2, 2)],
+        "Final_Capture_Pts": [0.0],
+        "Momentum": [momentum_label],
+        "Divergence": [divergence_level]
+    })
+    
+    trades = load_from_github()
+    if trades.empty:
+        save_to_github(trade_row)
+        trade_row.to_csv(trade_file, index=False)
+    else:
+        if now.strftime("%Y-%m-%d") not in trades["Date"].values:
+            updated_trades = pd.concat([trades, trade_row], ignore_index=True)
+            save_to_github(updated_trades)
+            updated_trades.to_csv(trade_file, index=False)
+
+if now.time() >= time(15, 30):
+    trades = load_from_github()
+    if not trades.empty:
+        if (trades.iloc[-1]["Status"] == "OPEN" and
+                trades.iloc[-1]["Date"] == now.strftime("%Y-%m-%d")):
+            entry_val = trades.iloc[-1]["Entry"]
+            sig_val = trades.iloc[-1]["Signal"]
+            pnl_val = (nifty_price - entry_val) if sig_val == "BULLISH" else (entry_val - nifty_price)
+            trades.loc[trades.index[-1],
+                       ["Exit", "PnL", "Status", "Final_Capture_Pts"]] = [
+                           nifty_price, round(pnl_val, 2), "CLOSED", round(pnl_val, 2)]
+            save_to_github(trades)
+            trades.to_csv(trade_file, index=False)
 
 # ==============================
 # UI RENDER
@@ -899,12 +948,6 @@ if divergence_detected:
     st.markdown(f'<div class="divergence-alert">{divergence_msg}</div>', unsafe_allow_html=True)
 if vix_warning:
     st.markdown(f'<div class="vix-alert">{vix_warning}</div>', unsafe_allow_html=True)
-if oi_fetch_error:
-    st.markdown(
-        f'<div class="vix-alert">⚠️ Code 3 (OI Predictor) unavailable: {oi_fetch_error} '
-        f'— Code 1 and Code 2 are unaffected.</div>',
-        unsafe_allow_html=True
-    )
 
 # Enhanced indicator pills with momentum
 def pill(label, value, pct, invert=False):
@@ -944,26 +987,19 @@ elif "BUYING" in pressure_type:
     st.success(f"✅ Domestic Buying Pressure Detected (Score: {pressure_score:.1f})")
 
 # ==============================
-# CODE 3 — OI based predictor: compute signal only if data fetched OK
+# CODE 3 – OI BASED PREDICTOR (NEW)
 # ==============================
-oi_signal = None
-if oi_raw_data is not None:
-    try:
-        oi_signal = compute_oi_signal(oi_raw_data["call_put_oi_data_list"], nifty_price)
-    except Exception as e:
-        oi_fetch_error = f"OI signal computation failed: {e}"
-        oi_signal = None
+oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price)
 
-if oi_signal:
-    if oi_signal["direction"] == "BULLISH":
-        oi_card_class = "bullish" if oi_signal["confidence"] > 70 else "weak-bullish"
-    elif oi_signal["direction"] == "BEARISH":
-        oi_card_class = "bearish" if oi_signal["confidence"] > 70 else "weak-bearish"
-    else:
-        oi_card_class = "neutral"
+# Determine card styling for OI
+if oi_signal["direction"] == "BULLISH":
+    oi_card_class = "bullish" if oi_signal["confidence"] > 70 else "weak-bullish"
+elif oi_signal["direction"] == "BEARISH":
+    oi_card_class = "bearish" if oi_signal["confidence"] > 70 else "weak-bearish"
 else:
-    oi_card_class = "no-data"
+    oi_card_class = "neutral"
 
+# NOW CREATE THREE COLUMNS
 top_cols = st.columns(3)
 
 with top_cols[0]:
@@ -1022,44 +1058,30 @@ with top_cols[1]:
 
 with top_cols[2]:
     st.subheader("📊 Code 3 — OI Open Interest")
-    if oi_signal:
-        st.markdown(f"""
-            <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
-                <div class="status-badge">OI SIGNAL</div>
-                <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
-                <div style="margin:6px 0; font-size:1.1rem;">
-                    Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp;
-                    PCR: {oi_signal['pcr']:.2f}
-                </div>
-                <div class="price-large" style="font-size:2.1rem; margin:6px 0;">
-                    Target: {oi_signal['target']:,.2f}
-                </div>
-                <div style="font-size:1rem; margin-bottom:5px;">
-                    Support: {oi_signal['support']:,.2f} &nbsp;|&nbsp;
-                    Resistance: {oi_signal['resistance']:,.2f}
-                </div>
-                <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">
-                    STOP: {oi_signal['stop_loss']:,.2f}
-                </div>
-                <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">
-                    Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']}
-                    &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%
-                </div>
+    st.markdown(f"""
+        <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
+            <div class="status-badge">OI SIGNAL</div>
+            <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
+            <div style="margin:6px 0; font-size:1.1rem;">
+                Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp;
+                PCR: {oi_signal['pcr']:.2f}
             </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-            <div class="prediction-card no-data" style="min-height:240px; padding:20px;">
-                <div class="status-badge">NO DATA</div>
-                <h2 style="margin:0; font-size:1.6rem;">OI Data Unavailable</h2>
-                <p style="font-size:0.9rem; margin-top:10px; opacity:0.9;">
-                    {oi_fetch_error or "Waiting for option chain data."}
-                </p>
-                <p style="font-size:0.8rem; margin-top:12px; opacity:0.75;">
-                    Expiry attempted: {expiry_str}
-                </p>
+            <div class="price-large" style="font-size:2.1rem; margin:6px 0;">
+                Target: {oi_signal['target']:,.2f}
             </div>
-        """, unsafe_allow_html=True)
+            <div style="font-size:1rem; margin-bottom:5px;">
+                Support: {oi_signal['support']:,.2f} &nbsp;|&nbsp;
+                Resistance: {oi_signal['resistance']:,.2f}
+            </div>
+            <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">
+                STOP: {oi_signal['stop_loss']:,.2f}
+            </div>
+            <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">
+                Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']}
+                &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
 
 with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", expanded=False):
     st.markdown("**Enhanced Code 2 factor-by-factor breakdown:**")
@@ -1075,9 +1097,6 @@ with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", 
         st.info("China market hasn't closed yet (12:30 PM IST). Code 2 signal will activate after that.")
     if "STRONG" in momentum_label and abs(nifty_change_pct) > 0.5:
         st.success(f"🚀 Strong momentum ({momentum_label}: {momentum_pct:+.2f}%) overrode signal threshold")
-    if oi_fetch_error:
-        st.markdown("**Code 3 (OI) status:**")
-        st.warning(f"⚠️ {oi_fetch_error}")
 
 if volatility_alerts:
     items = "".join([f"<li>{a}</li>" for a in volatility_alerts])
@@ -1123,6 +1142,25 @@ for i in range(0, len(final_display), 3):
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+
+# ---- Paper Trade Log Display ----
+df_trades = load_from_github()
+if not df_trades.empty:
+    st.write("---")
+    st.subheader("📦 Position Log & Variance Status")
+    st.dataframe(df_trades.tail(5), hide_index=True, use_container_width=True)
+
+    if len(df_trades) > 1:
+        closed = df_trades[df_trades["Status"] == "CLOSED"]
+        if not closed.empty:
+            wins = (closed["PnL"] > 0).sum()
+            total = len(closed)
+            win_pct = wins / total * 100 if total > 0 else 0
+            avg_pnl = closed["PnL"].mean() if total > 0 else 0
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Win Rate", f"{win_pct:.1f}%")
+            c2.metric("Avg P&L", f"{avg_pnl:+.1f} pts")
+            c3.metric("Trades", total)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Market Status:**")
