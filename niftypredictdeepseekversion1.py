@@ -176,12 +176,11 @@ top_20 = pd.DataFrame(oi_rows).sort_values(
     by="OI Difference",
     ascending=False
 ).head(20).reset_index(drop=True)
-# top_20 = pd.DataFrame(oi_rows).head(20)
 
-# st.dataframe(top_20)
+# IMPROVED HIGHLIGHT: golden background for top 5
 def highlight_top5(row):
     if row.name < 5:
-        return ["background-color: #fff3cd; font-weight: bold"] * len(row)
+        return ["background-color: #ffd700; font-weight: bold; color: #000000;"] * len(row)
     return [""] * len(row)
 
 st.dataframe(top_20.style.apply(highlight_top5, axis=1))
@@ -434,6 +433,105 @@ def calculate_confidence_score(weighted_pcts, vix_value, nifty_change_pct, press
     elif len(weighted_pcts) == 1:
         return 40.0
     return 0
+
+# ==============================
+# NEW CODE 3 – OI BASED PREDICTOR
+# ==============================
+
+def compute_max_pain(oi_data, spot):
+    strikes = [item["strike_price"] for item in oi_data]
+    best_strike = strikes[0]
+    min_pain = float('inf')
+    for s in strikes:
+        total = 0.0
+        for item in oi_data:
+            st = item["strike_price"]
+            call_oi = item["call_oi"]
+            put_oi = item["put_oi"]
+            # intrinsic value at strike s
+            total += call_oi * max(s - st, 0) + put_oi * max(st - s, 0)
+        if total < min_pain:
+            min_pain = total
+            best_strike = s
+    return best_strike
+
+def compute_oi_signal(oi_data_list, spot_price):
+    # total calls / puts
+    total_calls = sum(item["call_oi"] for item in oi_data_list)
+    total_puts = sum(item["put_oi"] for item in oi_data_list)
+    pcr = total_puts / total_calls if total_calls > 0 else 1.0
+
+    # max call OI strike (resistance) and max put OI strike (support)
+    max_call_strike = max(oi_data_list, key=lambda x: x["call_oi"])["strike_price"]
+    max_put_strike = max(oi_data_list, key=lambda x: x["put_oi"])["strike_price"]
+
+    # max pain
+    max_pain = compute_max_pain(oi_data_list, spot_price)
+
+    # voting
+    bull_votes = 0
+    bear_votes = 0
+
+    # 1. Max Pain direction
+    if spot_price > max_pain:
+        bear_votes += 1   # tend to move down
+    elif spot_price < max_pain:
+        bull_votes += 1   # tend to move up
+    # else neutral
+
+    # 2. PCR
+    if pcr > 1.5:
+        bear_votes += 1   # high puts -> bearish
+    elif pcr < 0.7:
+        bull_votes += 1   # low puts -> bullish
+
+    # 3. Support/Resistance break
+    if spot_price > max_call_strike:
+        bull_votes += 1   # broke resistance
+    elif spot_price < max_put_strike:
+        bear_votes += 1   # broke support
+
+    # direction
+    if bull_votes > bear_votes:
+        direction = "BULLISH"
+    elif bear_votes > bull_votes:
+        direction = "BEARISH"
+    else:
+        direction = "NEUTRAL"
+
+    # target: max pain strike (or average of support/resistance if neutral)
+    if direction == "BULLISH":
+        target = max_pain if max_pain > spot_price else spot_price * 1.005
+    elif direction == "BEARISH":
+        target = max_pain if max_pain < spot_price else spot_price * 0.995
+    else:
+        target = (max_call_strike + max_put_strike) / 2
+
+    # stop loss
+    if direction == "BULLISH":
+        stop_loss = min(spot_price * 0.995, max_put_strike)
+    elif direction == "BEARISH":
+        stop_loss = max(spot_price * 1.005, max_call_strike)
+    else:
+        stop_loss = spot_price
+
+    # confidence: based on OI concentration and PCR extremeness
+    oi_concentration = max(total_calls, total_puts) / (total_calls + total_puts + 1e-6)
+    pcr_extreme = abs(pcr - 1.0) / 1.0
+    confidence = min(100, 50 + 30 * oi_concentration + 20 * pcr_extreme)
+
+    return {
+        "direction": direction,
+        "target": round(target, 2),
+        "stop_loss": round(stop_loss, 2),
+        "confidence": round(confidence, 1),
+        "max_pain": round(max_pain, 2),
+        "resistance": round(max_call_strike, 2),
+        "support": round(max_put_strike, 2),
+        "pcr": round(pcr, 2),
+        "bull_votes": bull_votes,
+        "bear_votes": bear_votes,
+    }
 
 # ==============================
 # FETCH ALL DATA
@@ -888,7 +986,21 @@ if "SELLING" in pressure_type:
 elif "BUYING" in pressure_type:
     st.success(f"✅ Domestic Buying Pressure Detected (Score: {pressure_score:.1f})")
 
-top_cols = st.columns(2)
+# ==============================
+# CODE 3 – OI BASED PREDICTOR (NEW)
+# ==============================
+oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price)
+
+# Determine card styling for OI
+if oi_signal["direction"] == "BULLISH":
+    oi_card_class = "bullish" if oi_signal["confidence"] > 70 else "weak-bullish"
+elif oi_signal["direction"] == "BEARISH":
+    oi_card_class = "bearish" if oi_signal["confidence"] > 70 else "weak-bearish"
+else:
+    oi_card_class = "neutral"
+
+# NOW CREATE THREE COLUMNS
+top_cols = st.columns(3)
 
 with top_cols[0]:
     st.subheader("📊 Code 1 — Global Weighted Predictor")
@@ -941,6 +1053,33 @@ with top_cols[1]:
             <p style="margin-top:10px; font-size:0.82rem; opacity:0.8;">
                 Ref Prev Close: {nifty_prev_close:,.2f} | Current: {nifty_price:,.2f}
             </p>
+        </div>
+    """, unsafe_allow_html=True)
+
+with top_cols[2]:
+    st.subheader("📊 Code 3 — OI Open Interest")
+    st.markdown(f"""
+        <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
+            <div class="status-badge">OI SIGNAL</div>
+            <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
+            <div style="margin:6px 0; font-size:1.1rem;">
+                Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp;
+                PCR: {oi_signal['pcr']:.2f}
+            </div>
+            <div class="price-large" style="font-size:2.1rem; margin:6px 0;">
+                Target: {oi_signal['target']:,.2f}
+            </div>
+            <div style="font-size:1rem; margin-bottom:5px;">
+                Support: {oi_signal['support']:,.2f} &nbsp;|&nbsp;
+                Resistance: {oi_signal['resistance']:,.2f}
+            </div>
+            <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">
+                STOP: {oi_signal['stop_loss']:,.2f}
+            </div>
+            <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">
+                Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']}
+                &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%
+            </div>
         </div>
     """, unsafe_allow_html=True)
 
