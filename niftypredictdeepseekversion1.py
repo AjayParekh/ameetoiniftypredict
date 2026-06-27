@@ -148,7 +148,7 @@ is_after_china = now.time() >= CHINA_CLOSE_TIME
 #
 #   UPSTOX_TOKEN = "eyJ0eXAiOiJKV1Qi..."
 #
-UPSTOX_TOKEN = st.secrets.get("UPSTOX_TOKEN", None)
+UPSTOX_TOKEN = st.secrets.get("eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMDM2NjciLCJqdGkiOiI2OWQyMzJlMWNjZDUyZDRjZDQzMzc5NjYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc3NTM4MzI2NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODA2OTYyNDAwfQ.VFRZ5NP87NM1Vyn4-bCB2FAvanu4wsueNHo_POQtPv8", None)
 UPSTOX_OI_URL = "https://api.upstox.com/v2/market/oi"
 NIFTY_INSTRUMENT_KEY = "NSE_INDEX|Nifty 50"
 
