@@ -15,6 +15,10 @@ import warnings
 warnings.filterwarnings('ignore')
 import requests
 import json
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+
+access_token = 'Bearer eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMDM2NjciLCJqdGkiOiI2OWQyMzJlMWNjZDUyZDRjZDQzMzc5NjYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc3NTM4MzI2NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODA2OTYyNDAwfQ.VFRZ5NP87NM1Vyn4-bCB2FAvanu4wsueNHo_POQtPv8'
 
 # ==============================
 # PAGE CONFIG
@@ -132,23 +136,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-url = 'https://api.upstox.com/v2/market/oi'
-params = {
-    'instrument_key': 'NSE_INDEX|Nifty 50',
-    'expiry': '2026-06-30',
-    'date': '2026-06-26'
-}
-headers = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Authorization': 'Bearer eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMDM2NjciLCJqdGkiOiI2OWQyMzJlMWNjZDUyZDRjZDQzMzc5NjYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc3NTM4MzI2NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODA2OTYyNDAwfQ.VFRZ5NP87NM1Vyn4-bCB2FAvanu4wsueNHo_POQtPv8'
-}
+def fetch_upstox_oi_data():
+    url = 'https://api.upstox.com/v2/market/oi'
+    params = {
+        'instrument_key': 'NSE_INDEX|Nifty 50',
+        'expiry': '2026-06-30',
+        'date': '2026-06-29'
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': access_token  # Replace with your actual access token
+    }
 
-upstoxResponse = requests.get(url, params=params, headers=headers)
+    upstoxResponse = requests.get(url, params=params, headers=headers)
+    print("----------upstoxResponse ---------", upstoxResponse)
 
-upstoxResponse = json.loads(upstoxResponse.text)
+    upstoxResponse = json.loads(upstoxResponse.text)
+    return upstoxResponse
+upstoxResponse = fetch_upstox_oi_data()
+print("----------upstoxResponse ---------", isinstance(upstoxResponse, dict), upstoxResponse)
 data = upstoxResponse["data"]
-print("----------upstoxResponse ---------", data)
 
 
 
@@ -304,6 +312,16 @@ TV_URL  = "https://scanner.tradingview.com/global/scan"
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 SESSION = requests.Session()
 
+# Configure connection pooling
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=20, pool_maxsize=20)
+SESSION.mount("http://", adapter)
+SESSION.mount("https://", adapter)
+
 def fetch_master_data(symbol_dict):
     payload = {
         "symbols": {"tickers": [symbol_dict["tv_symbol"]], "query": {"types": []}},
@@ -311,11 +329,13 @@ def fetch_master_data(symbol_dict):
     }
     try:
         r = SESSION.post(TV_URL, json=payload, headers=HEADERS, timeout=5)
+        r.raise_for_status()
         d = r.json()["data"][0]["d"]
         close, pct, change_abs = d[0], d[1], d[2]
         prev_close = close - change_abs
         return symbol_dict, (round(prev_close, 2), round(close, 2), round(change_abs, 2), round(pct, 2))
-    except:
+    except Exception as e:
+        print(f"Error fetching {symbol_dict['name']}: {e}")
         return symbol_dict, None
 
 # ==============================
@@ -1168,3 +1188,199 @@ st.sidebar.markdown(f"- Nifty Change: {nifty_change_pct:+.2f}%")
 st.sidebar.markdown(f"- Momentum: {momentum_label}")
 st.sidebar.markdown(f"- Pressure: {pressure_type}")
 st.sidebar.markdown(f"- Divergence: {divergence_level if divergence_detected else 'NONE'}")
+
+def fetch_news_data():
+    """
+    Fetch news data from Upstox API and return the JSON response.
+    """
+    url = 'https://api.upstox.com/v2/news'
+    params = {
+        'category': 'instrument_keys',
+        'instrument_keys': 'NSE_EQ|INE040H01021,NSE_EQ|INE002A01018'
+    }
+    headers = {
+        'Accept': 'application/json',
+        'Authorization': access_token
+    }
+
+    response = requests.get(url, params=params, headers=headers)
+
+    print(isinstance(response.json(), dict), response.json())
+    parse_news_data(response.json()) if response.json().get("status") == "success" else None
+
+
+def fetch_futures_data():
+    """
+    Fetch futures data from Upstox API and return the JSON response.
+    """
+
+    url = 'https://api.upstox.com/v2/market/smartlist/futures'
+    params = {
+        'asset_type': 'INDEX',
+        'category': 'TOP_TRADED',
+        'page_number': 1,
+        'page_size': 20,
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': access_token  # Ensure you have a valid access token
+    }
+
+    response = requests.get(url, params=params, headers=headers)
+
+    # Allow user to upload a custom JSON (optional)
+    uploaded_file = json.loads(response.text)
+    # print("------fetch_futures_data------", uploaded_file)
+    if uploaded_file is not None:
+        data = uploaded_file
+    else:
+        data = json_data
+        
+    return data
+
+
+def parse_futures_flow(data):
+    """
+    Parses the screener JSON using raw absolute values for weighting and filtering.
+    Returns a Macro Bearish/Bullish Score (-1 to +1).
+    """
+    smartlist = data['data']['smartlist']
+    
+    # We will build a weighted average based on the absolute traded value
+    rows = []
+    weighted_score = 0.0
+    total_value_weight = 0.0
+    
+    for item in smartlist:
+        # Extract raw values
+        instrument_key = item['instrument_key']
+        current_value = item['metric']['current']
+        prev_value = item['metric']['previous']
+        change_abs = item['metric']['change_abs']  # Absolute change in turnover
+        change_pct = item['metric']['change_pct']  # Percentage change
+        
+        price_change = item['price']['change_pct']
+        
+        # 1. FILTER: Ignore instruments with tiny turnover (< 10 Crore / 100M) to avoid noise
+        if current_value < 100_000_000:  # Less than 10 Crore INR
+            continue  
+        
+        # 2. Calculate raw score for this instrument (-1 to 1)
+        score = 0.0
+        
+        # Logic using ABSOLUTE change (change_abs) AND percentage
+        # If absolute change is > 1 Billion (1,000,000,000) and price is falling hard
+        if change_abs > 1_000_000_000 and price_change < -0.3:
+            # Massive absolute selling pressure
+            score = -0.9
+        elif change_abs > 1_000_000_000 and price_change > 0.3:
+            # Massive absolute buying pressure
+            score = 0.9
+        elif change_pct > 30 and price_change < -0.3:
+            # High percentage surge but lower absolute value -> still bearish, but less
+            score = -0.6
+        elif change_pct > 10 and price_change < -0.5:
+            score = -0.4
+        elif change_pct > 10 and price_change > 0.5:
+            score = 0.4
+        else:
+            # For small absolute changes, the signal is weak
+            score = 0.0
+            
+        # 3. WEIGHT by absolute current value (Bigger contracts get more vote)
+        # This ensures Nifty (132B) weighs more than the small third contract (5.7B)
+        weight = current_value / 1_000_000_000  # Scale to billions for manageable numbers
+        
+        weighted_score += score * weight
+        total_value_weight += weight
+
+        # print(f"------parse_futures_flow----{instrument_key}------", {score, weight, weighted_score, total_value_weight, current_value, prev_value, change_abs, change_pct, price_change})
+        rows.append({
+            "instrument_key": instrument_key,
+            "score": score,
+            "weight": weight,
+            "weighted_score": score * weight,
+            "total_value_weight": total_value_weight,
+            "current_value": current_value,
+            "prev_value": prev_value,
+            "change_abs": change_abs,
+            "change_pct": change_pct,
+            "price_change": price_change,
+        })
+
+    df = pd.DataFrame(rows)
+        
+    # Normalize the weighted score
+    if total_value_weight == 0:
+        return 0.0
+        
+    final_score = weighted_score / total_value_weight
+
+    final_score = max(-1, min(1, final_score))  # Clamp to [-1, 1]
+    st.subheader(f"OI Flow Details {final_score:.2f}")
+    st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
+    if final_score > 0:
+        indicator = "Bullish"
+    elif final_score < 0:
+        indicator = "Bearish"
+    else:
+        indicator = "Sideways"
+
+    st.write(f"Market Bias: {indicator}")
+    # st.text(f"Weighted Score: {"Bullish" if final_score >= 0 else "Bearish"} ({final_score:.2f})")
+    st.dataframe(df)
+    return final_score
+
+def parse_news_data(data):
+    """
+    Parses the news JSON and returns a list of news items with relevant details.
+    """
+    
+    # Flatten news items
+    rows = []
+    for symbol, articles in data["data"].items():
+        for article in articles:
+            published_time = article.get("published_time")
+            published_str = None
+            if published_time:
+                published_str = datetime.fromtimestamp(published_time / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            rows.append({
+                "Symbol": symbol,
+                "Headline": article.get("heading", ""),
+                "Summary": article.get("summary", ""),
+                "Link": article.get("article_link", ""),
+                "Published": published_str,
+            })
+
+    # Create DataFrame
+    df = pd.DataFrame(rows)
+
+    st.title("News Table")
+    st.write("Latest news from futures_data.json")
+
+    # Display as a table
+    st.dataframe(df)
+
+# Example usage
+json_data = {
+    "status": "success",
+    "data": {
+        "asset_type": "INDEX",
+        "category": "TOP_TRADED",
+        "time_stamp": 1780045636752,
+        "metric_key": "total_traded_value",
+        "smartlist": [
+            {"instrument_key": "NSE_FO|62329", "price": {"current": 23867.0, "close_price": 23996.7, "change_abs": -129.70, "change_pct": -0.54}, "metric": {"current": 132094775540, "previous": 69295823909, "change_abs": 62798951631.00, "change_pct": 90.62}},
+            {"instrument_key": "NSE_FO|62326", "price": {"current": 54970.0, "close_price": 55207.0, "change_abs": -237.00, "change_pct": -0.43}, "metric": {"current": 45591018600, "previous": 43236361746, "change_abs": 2354656854.00, "change_pct": 5.45}},
+            {"instrument_key": "NSE_FO|61093", "price": {"current": 23977.8, "close_price": 24089.6, "change_abs": -111.80, "change_pct": -0.46}, "metric": {"current": 5752633887, "previous": 4917306790.5, "change_abs": 835327096.50, "change_pct": 16.99}}
+        ],
+        "page_number": 1, "page_size": 3, "total_pages": 9
+    }
+}
+
+fetched_data = fetch_futures_data()
+fetched_news = fetch_news_data()
+
+macro_score = parse_futures_flow(fetched_data)
+# print(f"Macro Flow Score: {macro_score}")  # Output: -0.8 (Extremely Bearish)
