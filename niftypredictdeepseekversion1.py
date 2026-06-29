@@ -171,7 +171,7 @@ st.subheader("OI by Strike Price")
 # Display as a table
 oi_rows = [
     {
-        "Strike Price": item["strike_price"],
+        "Strike Price": int(item["strike_price"]),
         "Call OI": item["call_oi"],
         "Put OI": item["put_oi"],
         "HIGH OI": "HIGH PUT" if item["put_oi"] > item["call_oi"] else "HIGH CALL",
