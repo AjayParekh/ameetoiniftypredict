@@ -137,11 +137,19 @@ st.markdown("""
 
 
 def fetch_upstox_oi_data():
+    # Auto date (today, IST) and auto weekly expiry (next Tuesday, IST)
+    ist_now = datetime.now(pytz.timezone("Asia/Kolkata"))
+    today_str = ist_now.strftime('%Y-%m-%d')
+
+    days_until_tuesday = (1 - ist_now.weekday()) % 7  # Monday=0 ... Tuesday=1
+    expiry_date = ist_now + dt_mod.timedelta(days=days_until_tuesday)
+    expiry_str = expiry_date.strftime('%Y-%m-%d')
+
     url = 'https://api.upstox.com/v2/market/oi'
     params = {
         'instrument_key': 'NSE_INDEX|Nifty 50',
-        'expiry': '2026-06-30',
-        'date': '2026-06-29'
+        'expiry': expiry_str,
+        'date': today_str
     }
     headers = {
         'Content-Type': 'application/json',
