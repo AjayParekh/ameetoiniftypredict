@@ -135,15 +135,61 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+def inr_format(num):
+    s = str(num)
+
+    if len(s) <= 3:
+        return s
+
+    # Last 3 digits
+    last_three = s[-3:]
+    remaining = s[:-3]
+
+    # Group remaining digits in pairs
+    parts = []
+    while len(remaining) > 2:
+        parts.insert(0, remaining[-2:])
+        remaining = remaining[:-2]
+
+    if remaining:
+        parts.insert(0, remaining)
+
+    return ",".join(parts + [last_three])
+
+# print(inr_format(180397180))
+
+
+# Auto date (today, IST) and auto weekly expiry (next Tuesday, IST)
+ist_now = datetime.now(pytz.timezone("Asia/Kolkata"))
+today_str = ist_now.strftime('%Y-%m-%d')
+
+days_until_tuesday = (1 - ist_now.weekday()) % 7  # Monday=0 ... Tuesday=1
+expiry_date = ist_now + dt_mod.timedelta(days=days_until_tuesday)
+expiry_str = expiry_date.strftime('%Y-%m-%d')
+
+def fetch_upstox_oi_change_data():
+    url = 'https://api.upstox.com/v2/market/change-oi'
+    params = {
+        'instrument_key': 'NSE_INDEX|Nifty 50',
+        'expiry': expiry_str,
+        'date': today_str,
+        'interval': 2
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': access_token
+    }
+
+    response = requests.get(url, params=params, headers=headers)
+    # print("fetch_upstox_oi_change_data", response.text)
+    upstoxResponse = json.loads(response.text)
+    return upstoxResponse
+
+
+upstoxOiChangeResponse = fetch_upstox_oi_change_data()
 
 def fetch_upstox_oi_data():
-    # Auto date (today, IST) and auto weekly expiry (next Tuesday, IST)
-    ist_now = datetime.now(pytz.timezone("Asia/Kolkata"))
-    today_str = ist_now.strftime('%Y-%m-%d')
-
-    days_until_tuesday = (1 - ist_now.weekday()) % 7  # Monday=0 ... Tuesday=1
-    expiry_date = ist_now + dt_mod.timedelta(days=days_until_tuesday)
-    expiry_str = expiry_date.strftime('%Y-%m-%d')
 
     url = 'https://api.upstox.com/v2/market/oi'
     params = {
@@ -158,48 +204,100 @@ def fetch_upstox_oi_data():
     }
 
     upstoxResponse = requests.get(url, params=params, headers=headers)
-    print("----------upstoxResponse ---------", upstoxResponse)
+    # print("----------upstoxResponse ---------", upstoxResponse)
 
     upstoxResponse = json.loads(upstoxResponse.text)
     return upstoxResponse
-upstoxResponse = fetch_upstox_oi_data()
-print("----------upstoxResponse ---------", isinstance(upstoxResponse, dict), upstoxResponse)
-data = upstoxResponse["data"]
+upstoxOiResponse = fetch_upstox_oi_data()
+data = upstoxOiResponse["data"]
+# print("----------upstoxResponse ---------", isinstance(upstoxResponse, dict), upstoxResponse)
 
 
+def reusable_display_oi_data(upstoxResponse, title):
+    data = upstoxResponse["data"]
+    
+    Total_Puts = 0
+    Total_Calls = 0
 
-st.write(f"Status: {upstoxResponse['status']}")
-st.write(f"Total Puts: {data['total_puts']}")
-st.write(f"Total Calls: {data['total_calls']}")
-st.write(f"Spot Closing Price: {data['spot_closing_price']}")
-st.write(f"Expiry: {data['expiry']}")
+    def get_oi_value(item, key1, key2, format_num=0):
+        nonlocal Total_Calls, Total_Puts
+        # if key1 in ("call_oi", "call_change_oi") or key2 in ("call_oi", "call_change_oi"):
+        #     Total_Calls += 1
+        # if key2 in ("put_oi", "put_change_oi") or key1 in ("put_oi", "put_change_oi"):
+        #     Total_Puts += 1
+        # print("get_oi_value", key1, key2, item.get(key1), item.get(key2), Total_Calls, Total_Puts)
+        value = item.get(key1) if item.get(key1) is not None else item.get(key2)
+        return inr_format(value) if format_num else value
+    
+    OI_Count = 0
+    def get_high_oi(item):
+        nonlocal Total_Calls, Total_Puts
+        # call_oi = item.get("call_oi", 0)
+        # put_oi = item.get("put_oi", 0)
+        # return max(call_oi, put_oi)
+        if get_oi_value(item, 'put_oi', 'put_change_oi') > get_oi_value(item, 'call_oi', 'call_change_oi'):
+            Total_Puts += 1
+            return "HIGH PUT"        
+        else:
+            Total_Calls += 1
+            return "HIGH CALL"
+        # if Total_Calls > Total_Puts:
+        #     OI_Count = Total_Calls
+        # else:
+        #     OI_Count = Total_Puts
 
-st.subheader("OI by Strike Price")
+    # Display as a table
+    oi_rows = [
+        {
+            "Strike Price": int(item["strike_price"]),
+            "Call OI": get_oi_value(item, 'call_oi', 'call_change_oi', format_num=1),
+            "Put OI": get_oi_value(item, 'put_oi', 'put_change_oi', format_num=1),
+            f"HIGH OI {OI_Count}": get_high_oi(item),
+            "OI Difference": abs(get_oi_value(item, 'put_oi', 'put_change_oi') - get_oi_value(item, 'call_oi', 'call_change_oi')),
+        }
+        for item in data["call_put_oi_data_list"]
+    ]
+    
+    oi_header = [
+        {
+            "Status": {upstoxResponse["status"]},
+            "Total Puts": {get_oi_value(data, 'total_puts', 'total_put_change_oi', format_num=1)},
+            "Total Calls": {get_oi_value(data, 'total_calls', 'total_call_change_oi', format_num=1)},
+            "Spot Closing Price": {data.get('spot_closing_price')},
+            "Expiry": {data.get('expiry')},
+            "Total Call OI": {Total_Calls},
+            "Total Put OI": {Total_Puts} 
+    }]
 
-# Display as a table
-oi_rows = [
-    {
-        "Strike Price": int(item["strike_price"]),
-        "Call OI": item["call_oi"],
-        "Put OI": item["put_oi"],
-        "HIGH OI": "HIGH PUT" if item["put_oi"] > item["call_oi"] else "HIGH CALL",
-        "OI Difference": abs(item["put_oi"] - item["call_oi"]),
-    }
-    for item in data["call_put_oi_data_list"]
-]
+    st.subheader(title)
+    
+    oi_table = pd.DataFrame(oi_header)
+    st.dataframe(oi_table)
 
-top_20 = pd.DataFrame(oi_rows).sort_values(
-    by="OI Difference",
-    ascending=False
-).head(20).reset_index(drop=True)
+    # st.write(f"Status: {upstoxResponse['status']}")
+    # st.write(f"Total Puts: {get_oi_value(data, 'total_puts', 'total_put_change_oi', format_num=1)}")
+    # st.write(f"Total Calls: {get_oi_value(data, 'total_calls', 'total_call_change_oi', format_num=1)}")
+    # st.write(f"Spot Closing Price: {get_oi_value(data, 'spot_closing_price', None, format_num=1)}")
+    # st.write(f"Expiry: {data.get('expiry')}")
+    # st.write(f"Total Call OI: {Total_Calls}")
+    # st.write(f"Total Put OI: {Total_Puts}")
 
-# IMPROVED HIGHLIGHT: golden background for top 5
-def highlight_top5(row):
-    if row.name < 5:
-        return ["background-color: #ffd700; font-weight: bold; color: #000000;"] * len(row)
-    return [""] * len(row)
+    top_20 = pd.DataFrame(oi_rows).sort_values(
+        by="OI Difference",
+        ascending=False
+    ).head(20).reset_index(drop=True)
 
-st.dataframe(top_20.style.apply(highlight_top5, axis=1))
+    # IMPROVED HIGHLIGHT: golden background for top 5
+    def highlight_top5(row):
+        if row.name < 5:
+            return ["background-color: #ffd700; font-weight: bold; color: #000000;"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(top_20.style.apply(highlight_top5, axis=1))
+
+
+reusable_display_oi_data(upstoxOiResponse, "Open Interest Data")
+reusable_display_oi_data(upstoxOiChangeResponse, "Change in OI")
 
 # ==============================
 # GLOBAL CONFIG & TIMING
@@ -1213,7 +1311,7 @@ def fetch_news_data():
 
     response = requests.get(url, params=params, headers=headers)
 
-    print(isinstance(response.json(), dict), response.json())
+    # print(isinstance(response.json(), dict), response.json())
     parse_news_data(response.json()) if response.json().get("status") == "success" else None
 
 
