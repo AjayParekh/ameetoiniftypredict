@@ -243,6 +243,7 @@ def reusable_display_oi_data(upstoxResponse, title):
             return ["background-color: #ffd700; font-weight: bold; color: #000000;"] * len(row)
         return [""] * len(row)
 
+    # Show the default numeric index column (0,1,2,…) as requested
     st.dataframe(top_20.style.apply(highlight_top5, axis=1))
 
 reusable_display_oi_data(upstoxOiResponse, "Open Interest Data")
@@ -320,9 +321,11 @@ with st.sidebar:
     w_hangseng= st.slider("Hang Seng",      0.0, 1.0, 0.05, 0.05, key="w_hangseng")
 
     st.markdown("---")
-    st.markdown("#### VIX Filter")
-    vix_threshold = st.slider("VIX Danger Level", 15.0, 35.0, 20.0, 0.5, key="vix_thresh")
-    vix_dampener  = st.slider("VIX Dampening Factor", 0.0, 1.0, 0.5, 0.05, key="vix_damp")
+    st.markdown("#### VIX Filters")
+    vix_threshold = st.slider("US VIX Danger Level", 15.0, 35.0, 20.0, 0.5, key="vix_thresh")
+    vix_dampener  = st.slider("US VIX Dampening Factor", 0.0, 1.0, 0.5, 0.05, key="vix_damp")
+    india_vix_threshold = st.slider("India VIX Danger Level", 15.0, 45.0, 25.0, 0.5, key="india_vix_thresh")
+    india_vix_dampener  = st.slider("India VIX Dampening Factor", 0.0, 1.0, 0.5, 0.05, key="india_vix_damp")
 
     st.markdown("---")
     st.markdown("#### Code 2 — Signal Gate")
@@ -353,6 +356,7 @@ master_symbols = [
     {"market": "USA",        "name": "Nasdaq 100",  "tv_symbol": "NASDAQ:NDX",       "start": "20:00", "end": "02:30", "icon": "🇺🇸", "w": w_nasdaq,   "trigger_alignment": True,  "category": "us"},
     {"market": "USA",        "name": "S&P 500",     "tv_symbol": "SP:SPX",           "start": "20:00", "end": "02:30", "icon": "🇺🇸", "w": 0,          "trigger_alignment": True,  "category": "us"},
     {"market": "Global",     "name": "VIX",         "tv_symbol": "TVC:VIX",          "start": "24 Hrs","end": "24 Hrs","icon": "😨", "w": 0,          "trigger_alignment": False, "category": "risk"},
+    {"market": "India",      "name": "India VIX",   "tv_symbol": "NSE:INDIAVIX",     "start": "09:15", "end": "15:30", "icon": "🇮🇳", "w": 0,          "trigger_alignment": False, "category": "india"},
     {"market": "Forex",      "name": "USD/INR",     "tv_symbol": "FX:USDINR",        "start": "24 Hrs","end": "24 Hrs","icon": "💱", "w": w_usdinr,   "trigger_alignment": False, "category": "currency"},
     {"market": "Global",     "name": "Dollar Index","tv_symbol": "TVC:DXY",          "start": "24 Hrs","end": "24 Hrs","icon": "💵", "w": w_dxy,      "trigger_alignment": False, "category": "currency"},
     {"market": "Germany",    "name": "DAX Index",   "tv_symbol": "XETR:DAX",         "start": "13:30", "end": "22:00", "icon": "🇩🇪", "w": w_dax,      "trigger_alignment": False, "category": "europe"},
@@ -455,17 +459,20 @@ def apply_domestic_override(sentiment_score, pressure_type, pressure_score, mome
             return sentiment_score * (1 - reduction), f"📈 Up Momentum Override: {reduction:.0%} reduction"
     return sentiment_score, "No override"
 
-def calculate_confidence_score(weighted_pcts, vix_value, nifty_change_pct, pressure_type):
+def calculate_confidence_score(weighted_pcts, vix_value, india_vix_value, nifty_change_pct, pressure_type):
     if len(weighted_pcts) > 1:
         std_dev = np.std(weighted_pcts)
         base_confidence = max(0, min(100, 100 - (std_dev * 20)))
+        # US VIX bonus
         vix_bonus = max(0, (20 - vix_value) * 0.5) if vix_value > 0 else 0
+        # India VIX bonus
+        india_vix_bonus = max(0, (20 - india_vix_value) * 0.3) if india_vix_value > 0 else 0
         pressure_penalty = 0
         if "SELLING" in pressure_type and nifty_change_pct < -0.2:
             pressure_penalty = min(30, abs(nifty_change_pct) * 30)
         elif "BUYING" in pressure_type and nifty_change_pct > 0.2:
             pressure_penalty = min(30, abs(nifty_change_pct) * 30)
-        confidence = min(100, base_confidence + vix_bonus - pressure_penalty)
+        confidence = min(100, base_confidence + vix_bonus + india_vix_bonus - pressure_penalty)
         return confidence
     elif len(weighted_pcts) == 1:
         return 40.0
@@ -679,6 +686,8 @@ hangseng_pct= 0.0
 sp500_pct   = 0.0
 nasdaq_pct  = 0.0
 topix_pct   = 0.0
+india_vix_value = 0.0
+india_vix_pct   = 0.0
 
 for s, res in results:
     if res:
@@ -688,6 +697,9 @@ for s, res in results:
             nifty_price, nifty_prev_close = close, prev
         elif s["name"] == "VIX":
             vix_value = close
+        elif s["name"] == "India VIX":
+            india_vix_value = close
+            india_vix_pct   = pct
         elif s["name"] == "USD/INR":
             usdinr_pct = pct
         elif s["name"] == "CSI 300":
@@ -730,27 +742,51 @@ pressure_type, pressure_score, pressure_reasons = detect_domestic_pressure(
 momentum_score, momentum_label, momentum_pct = calculate_momentum_score(
     nifty_price, nifty_prev_close, momentum_lookback)
 
+# ---- IMPROVED VIX LOGIC (US + India) ----
 vix_regime = "NORMAL"
 vix_dampener_val = 1.0
 vix_warning = ""
+
+# US VIX
+us_vix_dampener = 1.0
 if vix_value > 0:
     if vix_value >= vix_threshold + 5:
+        us_vix_dampener = vix_dampener * 0.3
         vix_regime = "EXTREME FEAR"
-        vix_dampener_val = vix_dampener * 0.3
-        vix_warning = f"🔴 VIX EXTREME: {vix_value:.1f} — Strong bearish overlay applied."
+        vix_warning = f"🔴 US VIX EXTREME: {vix_value:.1f}"
     elif vix_value >= vix_threshold:
+        us_vix_dampener = vix_dampener
         vix_regime = "ELEVATED"
-        vix_dampener_val = vix_dampener
-        vix_warning = f"🟡 VIX ELEVATED: {vix_value:.1f} — Bullish signals dampened."
+        vix_warning = f"🟡 US VIX ELEVATED: {vix_value:.1f}"
+
+# India VIX
+india_vix_dampener = 1.0
+india_vix_regime = "NORMAL"
+if india_vix_value > 0:
+    if india_vix_value >= india_vix_threshold + 5:
+        india_vix_dampener = india_vix_dampener * 0.3
+        india_vix_regime = "EXTREME FEAR"
+        vix_warning += f" | 🔴 India VIX EXTREME: {india_vix_value:.1f}"
+    elif india_vix_value >= india_vix_threshold:
+        india_vix_dampener = india_vix_dampener
+        india_vix_regime = "ELEVATED"
+        vix_warning += f" | 🟡 India VIX ELEVATED: {india_vix_value:.1f}"
+
+# Combine dampeners (take the more conservative, i.e., smaller)
+combined_dampener = min(us_vix_dampener, india_vix_dampener)
+
+# Build warning message if any
+if vix_warning:
+    vix_warning = "⚠️ " + vix_warning + " — Bullish signals dampened."
 
 raw_sentiment = sentiment_score_c1
-if raw_sentiment > 0 and vix_dampener_val < 1.0:
-    sentiment_score_c1 = raw_sentiment * vix_dampener_val
+if raw_sentiment > 0 and combined_dampener < 1.0:
+    sentiment_score_c1 = raw_sentiment * combined_dampener
 
 sentiment_score_c1, override_note = apply_domestic_override(
     sentiment_score_c1, pressure_type, pressure_score, momentum_score)
 
-confidence = calculate_confidence_score(weighted_pcts_c1, vix_value, nifty_change_pct, pressure_type)
+confidence = calculate_confidence_score(weighted_pcts_c1, vix_value, india_vix_value, nifty_change_pct, pressure_type)
 target_price_c1 = round(nifty_prev_close * (1 + (sentiment_score_c1 / 100)), 2) if nifty_prev_close > 0 else 0.0
 pred_change_c1 = round(target_price_c1 - nifty_prev_close, 2)
 pred_pct_c1 = round(sentiment_score_c1, 2)
@@ -764,7 +800,7 @@ else:                           pred_text_c1 = "STRONG BEARISH ⚠️"
 if "override" in override_note.lower() and "No override" not in override_note:
     pred_text_c1 = f"{pred_text_c1} {override_note}"
 
-# Code 2
+# Code 2 (unchanged)
 def compute_signal_score_enhanced(trigger_pcts, china_pct, sgx_pct, vix_val, usdinr_pct,
                                   hangseng_pct, nifty_change_pct, pressure_type, momentum_label):
     bull_votes, bear_votes = 0, 0
@@ -921,13 +957,16 @@ def pill(label, value, pct, invert=False):
     return f'<span class="indicator-pill {cls}">{label}: {value:.2f} ({sign}{pct:.2f}%)</span>'
 
 vix_pill_cls = "pill-green" if vix_value < 15 else ("pill-red" if vix_value > vix_threshold else "pill-yellow")
-vix_pill = f'<span class="indicator-pill {vix_pill_cls}">😨 VIX: {vix_value:.1f} [{vix_regime}]</span>' if vix_value > 0 else ""
+vix_pill = f'<span class="indicator-pill {vix_pill_cls}">😨 US VIX: {vix_value:.1f} [{vix_regime}]</span>' if vix_value > 0 else ""
+india_vix_color = "pill-green" if india_vix_value < 20 else ("pill-red" if india_vix_value > india_vix_threshold else "pill-yellow")
+india_vix_pill = f'<span class="indicator-pill {india_vix_color}">🇮🇳 India VIX: {india_vix_value:.1f} [{india_vix_regime}]</span>' if india_vix_value > 0 else ""
 momentum_color = "pill-green" if "BULLISH" in momentum_label else ("pill-red" if "BEARISH" in momentum_label else "pill-yellow")
 momentum_pill = f'<span class="indicator-pill {momentum_color}">🚀 {momentum_label}: {momentum_pct:+.2f}%</span>'
 
 pills_html = f"""
 <div class="indicator-row">
     {vix_pill}
+    {india_vix_pill}
     {momentum_pill}
     {pill("🏦 BNF", sgx_pct, sgx_pct)}
     {pill("🎁 GIFT", gift_pct, gift_pct)}
@@ -953,7 +992,7 @@ with top_cols[0]:
         (sentiment_score_c1 < -0.01 and nifty_price <= target_price_c1)
     ) else "Pending"
     achieved_class = "prediction-achieved" if status_c1 == "Achieved" else ""
-    vix_note = f" | VIX dampener: {vix_dampener_val:.0%}" if vix_dampener_val < 1.0 else ""
+    vix_note = f" | US VIX dampener: {us_vix_dampener:.0%} | India VIX: {india_vix_dampener:.0%}" if combined_dampener < 1.0 else ""
     st.markdown(f"""
         <div class="prediction-box {achieved_class}" style="min-height: 240px;">
             <div class="status-badge">{'ACTIVE' if not divergence_detected else 'DIVERTED'}</div>
@@ -1081,6 +1120,8 @@ st.sidebar.markdown(f"- Nifty Change: {nifty_change_pct:+.2f}%")
 st.sidebar.markdown(f"- Momentum: {momentum_label}")
 st.sidebar.markdown(f"- Pressure: {pressure_type}")
 st.sidebar.markdown(f"- Divergence: {divergence_level if divergence_detected else 'NONE'}")
+if india_vix_value > 0:
+    st.sidebar.markdown(f"- India VIX: {india_vix_value:.1f} ({india_vix_pct:+.2f}%)")
 
 # ==============================
 # NEWS (optional, not used in prediction)
