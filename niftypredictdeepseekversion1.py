@@ -8,9 +8,6 @@ import pytz
 from streamlit_autorefresh import st_autorefresh
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-from github import Github, GithubException
-import base64
-from io import StringIO
 import warnings
 warnings.filterwarnings('ignore')
 import json
@@ -156,6 +153,11 @@ days_until_tuesday = (1 - ist_now.weekday()) % 7  # Monday=0 ... Tuesday=1
 expiry_date = ist_now + dt_mod.timedelta(days=days_until_tuesday)
 expiry_str = expiry_date.strftime('%Y-%m-%d')
 
+# Sensex weekly expiry is Thursday (BSE, effective 4 Sep 2025)
+days_until_thursday = (3 - ist_now.weekday()) % 7  # Monday=0 ... Thursday=3
+sensex_expiry_date = ist_now + dt_mod.timedelta(days=days_until_thursday)
+sensex_expiry_str = sensex_expiry_date.strftime('%Y-%m-%d')
+
 def fetch_upstox_oi_change_data():
     url = 'https://api.upstox.com/v2/market/change-oi'
     params = {
@@ -191,6 +193,41 @@ def fetch_upstox_oi_data():
 
 upstoxOiResponse = fetch_upstox_oi_data()
 data = upstoxOiResponse["data"]
+
+def fetch_upstox_sensex_oi_change_data():
+    url = 'https://api.upstox.com/v2/market/change-oi'
+    params = {
+        'instrument_key': 'BSE_INDEX|SENSEX',
+        'expiry': sensex_expiry_str,
+        'date': today_str,
+        'interval': 2
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': access_token
+    }
+    response = requests.get(url, params=params, headers=headers)
+    return json.loads(response.text)
+
+upstoxSensexOiChangeResponse = fetch_upstox_sensex_oi_change_data()
+
+def fetch_upstox_sensex_oi_data():
+    url = 'https://api.upstox.com/v2/market/oi'
+    params = {
+        'instrument_key': 'BSE_INDEX|SENSEX',
+        'expiry': sensex_expiry_str,
+        'date': today_str
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': access_token
+    }
+    response = requests.get(url, params=params, headers=headers)
+    return json.loads(response.text)
+
+upstoxSensexOiResponse = fetch_upstox_sensex_oi_data()
 
 def reusable_display_oi_data(upstoxResponse, title):
     data = upstoxResponse["data"]
@@ -246,8 +283,10 @@ def reusable_display_oi_data(upstoxResponse, title):
     # Show the default numeric index column (0,1,2,…) as requested
     st.dataframe(top_20.style.apply(highlight_top5, axis=1))
 
-reusable_display_oi_data(upstoxOiResponse, "Open Interest Data")
-reusable_display_oi_data(upstoxOiChangeResponse, "Change in OI")
+reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
+reusable_display_oi_data(upstoxOiChangeResponse, "Nifty Change in OI")
+reusable_display_oi_data(upstoxSensexOiResponse, "Sensex Open Interest Data")
+reusable_display_oi_data(upstoxSensexOiChangeResponse, "Sensex Change in OI")
 
 # ==============================
 # GLOBAL CONFIG & TIMING
@@ -259,50 +298,7 @@ today = now.strftime("%Y-%m-%d")
 
 CHINA_CLOSE_TIME = time(12, 30)
 is_after_china = now.time() >= CHINA_CLOSE_TIME
-trade_file = "Paper_Trades.csv"
 excel_file = "Market_Data.xlsx"
-
-# ==============================
-# GITHUB API CONFIGURATION
-# ==============================
-GITHUB_TOKEN = "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"
-REPO_NAME = "AjayParekh/niftypredictiondeepseekversion1"
-FILE_PATH = "Paper_Trades.csv"
-
-def save_to_github(dataframe, filename=FILE_PATH, repo_name=REPO_NAME, token=GITHUB_TOKEN):
-    if not token:
-        dataframe.to_csv(filename, index=False)
-        return
-    try:
-        g = Github(token)
-        repo = g.get_repo(repo_name)
-        csv_content = dataframe.to_csv(index=False)
-        try:
-            contents = repo.get_contents(filename)
-            repo.update_file(contents.path, f"Update trade log {datetime.now().strftime('%Y-%m-%d %H:%M')}", csv_content, contents.sha)
-        except GithubException as e:
-            if e.status == 404:
-                repo.create_file(filename, "Initial trade log commit", csv_content)
-            else:
-                raise e
-    except Exception as e:
-        st.sidebar.error(f"GitHub Sync Failed: {e}")
-
-def load_from_github(filename=FILE_PATH, repo_name=REPO_NAME, token=GITHUB_TOKEN):
-    if not token:
-        if os.path.exists(filename):
-            return pd.read_csv(filename)
-        return pd.DataFrame()
-    try:
-        g = Github(token)
-        repo = g.get_repo(repo_name)
-        contents = repo.get_contents(filename)
-        decoded = base64.b64decode(contents.content).decode('utf-8')
-        return pd.read_csv(StringIO(decoded))
-    except Exception:
-        if os.path.exists(filename):
-            return pd.read_csv(filename)
-        return pd.DataFrame()
 
 # ==============================
 # SIDEBAR
@@ -340,11 +336,6 @@ with st.sidebar:
         st.sidebar.success("China Logic: ACTIVE")
     else:
         st.sidebar.warning("Waiting for 12:30 PM IST")
-
-    if st.sidebar.button("🗑️ Reset All Logs"):
-        if os.path.exists(trade_file): os.remove(trade_file)
-        save_to_github(pd.DataFrame())
-        st.rerun()
 
 # ==============================
 # MASTER INSTRUMENT LIST
@@ -394,6 +385,22 @@ def fetch_master_data(symbol_dict):
         print(f"Error fetching {symbol_dict['name']}: {e}")
         return symbol_dict, None
 
+def calculate_momentum_score(nifty_price, nifty_prev_close, lookback_minutes=15):
+    try:
+        change_pct = ((nifty_price - nifty_prev_close) / nifty_prev_close) * 100 if nifty_prev_close > 0 else 0
+        if change_pct < -0.5:
+            return -2, "STRONG_BEARISH", change_pct
+        elif change_pct < -0.25:
+            return -1, "BEARISH", change_pct
+        elif change_pct > 0.5:
+            return 2, "STRONG_BULLISH", change_pct
+        elif change_pct > 0.25:
+            return 1, "BULLISH", change_pct
+        else:
+            return 0, "NEUTRAL", change_pct
+    except:
+        return 0, "NEUTRAL", 0
+
 # ==============================
 # ENHANCED PREDICTION FUNCTIONS (Code 1 & 2)
 # ==============================
@@ -425,22 +432,6 @@ def detect_domestic_pressure(nifty_change_pct, sgx_pct, gift_pct, nifty_price, n
                 pressure_score = abs(nifty_change_pct) * 2
                 reasons.append(f"✅ Strong upward momentum: {nifty_change_pct:+.2f}%")
     return pressure_type, pressure_score, reasons
-
-def calculate_momentum_score(nifty_price, nifty_prev_close, lookback_minutes=15):
-    try:
-        change_pct = ((nifty_price - nifty_prev_close) / nifty_prev_close) * 100 if nifty_prev_close > 0 else 0
-        if change_pct < -0.5:
-            return -2, "STRONG_BEARISH", change_pct
-        elif change_pct < -0.25:
-            return -1, "BEARISH", change_pct
-        elif change_pct > 0.5:
-            return 2, "STRONG_BULLISH", change_pct
-        elif change_pct > 0.25:
-            return 1, "BULLISH", change_pct
-        else:
-            return 0, "NEUTRAL", change_pct
-    except:
-        return 0, "NEUTRAL", 0
 
 def apply_domestic_override(sentiment_score, pressure_type, pressure_score, momentum_score):
     if "SELLING" in pressure_type:
@@ -478,8 +469,67 @@ def calculate_confidence_score(weighted_pcts, vix_value, india_vix_value, nifty_
         return 40.0
     return 0
 
+def compute_signal_score_enhanced(trigger_pcts, china_pct, sgx_pct, vix_val, usdinr_pct,
+                                  hangseng_pct, nifty_change_pct, pressure_type, momentum_label):
+    bull_votes, bear_votes = 0, 0
+    reasons = []
+    trigger_positives = sum(1 for x in trigger_pcts if x > 0)
+    trigger_negatives = sum(1 for x in trigger_pcts if x < 0)
+    trigger_total = len(trigger_pcts)
+    if trigger_total > 0:
+        if trigger_positives >= int(trigger_total * 0.6):
+            bull_votes += 1; reasons.append(f"✅ {trigger_positives}/{trigger_total} global triggers bullish")
+        elif trigger_negatives >= int(trigger_total * 0.6):
+            bear_votes += 1; reasons.append(f"🔴 {trigger_negatives}/{trigger_total} global triggers bearish")
+        else:
+            reasons.append(f"⚪ Mixed trigger signals ({trigger_positives}↑ {trigger_negatives}↓)")
+    if china_pct > 0.3:
+        bull_votes += 1; reasons.append(f"✅ CSI 300 bullish ({china_pct:+.2f}%)")
+    elif china_pct < -0.3:
+        bear_votes += 1; reasons.append(f"🔴 CSI 300 bearish ({china_pct:+.2f}%)")
+    else:
+        reasons.append(f"⚪ CSI 300 flat ({china_pct:+.2f}%)")
+    if sgx_pct > 0.2:
+        bull_votes += 1; reasons.append(f"✅ BankNifty Fut bullish ({sgx_pct:+.2f}%)")
+    elif sgx_pct < -0.2:
+        bear_votes += 1; reasons.append(f"🔴 BankNifty Fut bearish ({sgx_pct:+.2f}%)")
+    else:
+        reasons.append(f"⚪ BankNifty Fut flat ({sgx_pct:+.2f}%)")
+    if vix_val > 0:
+        if vix_val < 15:
+            bull_votes += 1; reasons.append(f"✅ VIX calm ({vix_val:.1f})")
+        elif vix_val > vix_threshold:
+            bear_votes += 1; reasons.append(f"🔴 VIX elevated ({vix_val:.1f})")
+        else:
+            reasons.append(f"⚪ VIX neutral ({vix_val:.1f})")
+    if usdinr_pct < -0.1:
+        bull_votes += 1; reasons.append(f"✅ Rupee strengthening ({usdinr_pct:+.2f}%)")
+    elif usdinr_pct > 0.2:
+        bear_votes += 1; reasons.append(f"🔴 Rupee weakening ({usdinr_pct:+.2f}%)")
+    else:
+        reasons.append(f"⚪ USD/INR stable ({usdinr_pct:+.2f}%)")
+    if "SELLING" in pressure_type:
+        bear_votes += 2; reasons.append(f"🔴🔴 DOMESTIC SELLING PRESSURE")
+    elif "BUYING" in pressure_type:
+        bull_votes += 2; reasons.append(f"✅✅ DOMESTIC BUYING PRESSURE")
+    if "STRONG_BEARISH" in momentum_label:
+        bear_votes += 2; reasons.append(f"🔴🔴 STRONG DOWN MOMENTUM")
+    elif "BEARISH" in momentum_label:
+        bear_votes += 1; reasons.append(f"🔴 Down momentum")
+    elif "STRONG_BULLISH" in momentum_label:
+        bull_votes += 2; reasons.append(f"✅✅ STRONG UP MOMENTUM")
+    elif "BULLISH" in momentum_label:
+        bull_votes += 1; reasons.append(f"✅ Up momentum")
+    if bull_votes > bear_votes:
+        direction = "BULLISH"; score = bull_votes
+    elif bear_votes > bull_votes:
+        direction = "BEARISH"; score = bear_votes
+    else:
+        direction = "NEUTRAL"; score = 0
+    return direction, score, bull_votes, bear_votes, reasons
+
 # ==============================
-# NEW CODE 3 – OI + Change OI + Flow Predictor
+# CODE 3 – OI + Change OI + Flow Predictor
 # ==============================
 def compute_oi_signal(oi_data_list, spot_price, change_oi_data_list=None, macro_flow_score=None):
     total_calls = sum(item["call_oi"] for item in oi_data_list)
@@ -616,8 +666,10 @@ def fetch_futures_data():
     response = requests.get(url, params=params, headers=headers)
     return json.loads(response.text)
 
-def parse_futures_flow(data):
+def parse_futures_flow(data, title="OI Flow Details", key_prefix=None):
     smartlist = data['data']['smartlist']
+    if key_prefix:
+        smartlist = [item for item in smartlist if item["instrument_key"].startswith(key_prefix)]
     rows = []
     weighted_score = 0.0
     total_value_weight = 0.0
@@ -656,11 +708,14 @@ def parse_futures_flow(data):
     else:
         final_score = weighted_score / total_value_weight
     final_score = max(-1, min(1, final_score))
-    st.subheader(f"OI Flow Details — Macro Score: {final_score:.2f}")
+    st.subheader(f"{title} — Macro Score: {final_score:.2f}")
     st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
     indicator = "Bullish" if final_score > 0 else ("Bearish" if final_score < 0 else "Sideways")
     st.write(f"Market Bias: {indicator}")
-    st.dataframe(pd.DataFrame(rows))
+    if rows:
+        st.dataframe(pd.DataFrame(rows))
+    else:
+        st.info(f"No {title.split(' OI')[0]} futures met the turnover threshold right now.")
     return final_score
 
 # ==============================
@@ -670,11 +725,11 @@ with ThreadPoolExecutor(max_workers=len(master_symbols)) as executor:
     results = list(executor.map(fetch_master_data, master_symbols))
 
 # Parse master data
+final_display     = []
+volatility_alerts = []
 weighted_pcts_c1  = []
 sentiment_score_c1 = 0.0
 trigger_pcts_c2   = []
-final_display     = []
-volatility_alerts = []
 
 nifty_price = nifty_prev_close = 0.0
 vix_value   = 0.0
@@ -728,7 +783,11 @@ for s, res in results:
 
 # OI Flow
 fetched_data = fetch_futures_data()
-macro_score = parse_futures_flow(fetched_data)
+nifty_macro_score = parse_futures_flow(fetched_data, title="Nifty OI Flow Details", key_prefix="NSE_FO")
+sensex_macro_score = parse_futures_flow(fetched_data, title="Sensex OI Flow Details", key_prefix="BSE_FO")
+
+momentum_score, momentum_label, momentum_pct = calculate_momentum_score(
+    nifty_price, nifty_prev_close, momentum_lookback)
 
 # ==============================
 # CODE 1 & 2 CALCULATIONS
@@ -738,9 +797,6 @@ nifty_actual_change = nifty_price - nifty_prev_close
 
 pressure_type, pressure_score, pressure_reasons = detect_domestic_pressure(
     nifty_change_pct, sgx_pct, gift_pct, nifty_price, nifty_prev_close)
-
-momentum_score, momentum_label, momentum_pct = calculate_momentum_score(
-    nifty_price, nifty_prev_close, momentum_lookback)
 
 # ---- IMPROVED VIX LOGIC (US + India) ----
 vix_regime = "NORMAL"
@@ -800,66 +856,6 @@ else:                           pred_text_c1 = "STRONG BEARISH ⚠️"
 if "override" in override_note.lower() and "No override" not in override_note:
     pred_text_c1 = f"{pred_text_c1} {override_note}"
 
-# Code 2 (unchanged)
-def compute_signal_score_enhanced(trigger_pcts, china_pct, sgx_pct, vix_val, usdinr_pct,
-                                  hangseng_pct, nifty_change_pct, pressure_type, momentum_label):
-    bull_votes, bear_votes = 0, 0
-    reasons = []
-    trigger_positives = sum(1 for x in trigger_pcts if x > 0)
-    trigger_negatives = sum(1 for x in trigger_pcts if x < 0)
-    trigger_total = len(trigger_pcts)
-    if trigger_total > 0:
-        if trigger_positives >= int(trigger_total * 0.6):
-            bull_votes += 1; reasons.append(f"✅ {trigger_positives}/{trigger_total} global triggers bullish")
-        elif trigger_negatives >= int(trigger_total * 0.6):
-            bear_votes += 1; reasons.append(f"🔴 {trigger_negatives}/{trigger_total} global triggers bearish")
-        else:
-            reasons.append(f"⚪ Mixed trigger signals ({trigger_positives}↑ {trigger_negatives}↓)")
-    if china_pct > 0.3:
-        bull_votes += 1; reasons.append(f"✅ CSI 300 bullish ({china_pct:+.2f}%)")
-    elif china_pct < -0.3:
-        bear_votes += 1; reasons.append(f"🔴 CSI 300 bearish ({china_pct:+.2f}%)")
-    else:
-        reasons.append(f"⚪ CSI 300 flat ({china_pct:+.2f}%)")
-    if sgx_pct > 0.2:
-        bull_votes += 1; reasons.append(f"✅ BankNifty Fut bullish ({sgx_pct:+.2f}%)")
-    elif sgx_pct < -0.2:
-        bear_votes += 1; reasons.append(f"🔴 BankNifty Fut bearish ({sgx_pct:+.2f}%)")
-    else:
-        reasons.append(f"⚪ BankNifty Fut flat ({sgx_pct:+.2f}%)")
-    if vix_val > 0:
-        if vix_val < 15:
-            bull_votes += 1; reasons.append(f"✅ VIX calm ({vix_val:.1f})")
-        elif vix_val > vix_threshold:
-            bear_votes += 1; reasons.append(f"🔴 VIX elevated ({vix_val:.1f})")
-        else:
-            reasons.append(f"⚪ VIX neutral ({vix_val:.1f})")
-    if usdinr_pct < -0.1:
-        bull_votes += 1; reasons.append(f"✅ Rupee strengthening ({usdinr_pct:+.2f}%)")
-    elif usdinr_pct > 0.2:
-        bear_votes += 1; reasons.append(f"🔴 Rupee weakening ({usdinr_pct:+.2f}%)")
-    else:
-        reasons.append(f"⚪ USD/INR stable ({usdinr_pct:+.2f}%)")
-    if "SELLING" in pressure_type:
-        bear_votes += 2; reasons.append(f"🔴🔴 DOMESTIC SELLING PRESSURE")
-    elif "BUYING" in pressure_type:
-        bull_votes += 2; reasons.append(f"✅✅ DOMESTIC BUYING PRESSURE")
-    if "STRONG_BEARISH" in momentum_label:
-        bear_votes += 2; reasons.append(f"🔴🔴 STRONG DOWN MOMENTUM")
-    elif "BEARISH" in momentum_label:
-        bear_votes += 1; reasons.append(f"🔴 Down momentum")
-    elif "STRONG_BULLISH" in momentum_label:
-        bull_votes += 2; reasons.append(f"✅✅ STRONG UP MOMENTUM")
-    elif "BULLISH" in momentum_label:
-        bull_votes += 1; reasons.append(f"✅ Up momentum")
-    if bull_votes > bear_votes:
-        direction = "BULLISH"; score = bull_votes
-    elif bear_votes > bull_votes:
-        direction = "BEARISH"; score = bear_votes
-    else:
-        direction = "NEUTRAL"; score = 0
-    return direction, score, bull_votes, bear_votes, reasons
-
 direction_c2, score_c2, bull_votes_c2, bear_votes_c2, reasons_c2 = compute_signal_score_enhanced(
     trigger_pcts_c2, china_pct, sgx_pct, vix_value, usdinr_pct, hangseng_pct,
     nifty_change_pct, pressure_type, momentum_label)
@@ -907,10 +903,10 @@ elif prediction_c2 == "BEARISH":                                   card_class_c2
 else:                                                              card_class_c2 = "neutral"
 
 # ==============================
-# CODE 3 – OI prediction
+# CODE 3 – OI prediction (Nifty)
 # ==============================
 change_oi_data = upstoxOiChangeResponse["data"]["call_put_oi_data_list"] if upstoxOiChangeResponse.get("status") == "success" else None
-oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price, change_oi_data, macro_score)
+oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price, change_oi_data, nifty_macro_score)
 
 # Determine OI card style
 if oi_signal["direction"] == "BULLISH":
@@ -921,7 +917,7 @@ else:
     oi_card_class = "neutral"
 
 # ==============================
-# DIVERGENCE & UI RENDER
+# DIVERGENCE
 # ==============================
 divergence_detected = False
 divergence_msg = ""
@@ -940,6 +936,9 @@ if nifty_price > 0 and nifty_prev_close > 0:
                           f"({raw_sentiment:.2f}% → {sentiment_score_c1:+.2f}%), "
                           f"but Nifty Spot is squeezing up ({nifty_change_pct:+.2f}% / {nifty_actual_change:+.2f} pts).")
 
+# ==============================
+# UI RENDER
+# ==============================
 st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
 if divergence_detected:
     st.markdown(f'<div class="divergence-alert">{divergence_msg}</div>', unsafe_allow_html=True)
@@ -1095,33 +1094,6 @@ for i in range(0, len(final_display), 3):
                         <div style="margin-top:10px; font-size:0.65rem; color:#bbb; border-top:1px dashed #eee; padding-top:5px; text-align:center;">{strategy_tag}</div>
                     </div>
                     """, unsafe_allow_html=True)
-
-# ---- Paper Trade Log Display ----
-df_trades = load_from_github()
-if not df_trades.empty:
-    st.write("---")
-    st.subheader("📦 Position Log & Variance Status")
-    st.dataframe(df_trades.tail(5), hide_index=True, use_container_width=True)
-    if len(df_trades) > 1:
-        closed = df_trades[df_trades["Status"] == "CLOSED"]
-        if not closed.empty:
-            wins = (closed["PnL"] > 0).sum()
-            total = len(closed)
-            win_pct = wins / total * 100 if total > 0 else 0
-            avg_pnl = closed["PnL"].mean() if total > 0 else 0
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Win Rate", f"{win_pct:.1f}%")
-            c2.metric("Avg P&L", f"{avg_pnl:+.1f} pts")
-            c3.metric("Trades", total)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Market Status:**")
-st.sidebar.markdown(f"- Nifty Change: {nifty_change_pct:+.2f}%")
-st.sidebar.markdown(f"- Momentum: {momentum_label}")
-st.sidebar.markdown(f"- Pressure: {pressure_type}")
-st.sidebar.markdown(f"- Divergence: {divergence_level if divergence_detected else 'NONE'}")
-if india_vix_value > 0:
-    st.sidebar.markdown(f"- India VIX: {india_vix_value:.1f} ({india_vix_pct:+.2f}%)")
 
 # ==============================
 # NEWS (optional, not used in prediction)
