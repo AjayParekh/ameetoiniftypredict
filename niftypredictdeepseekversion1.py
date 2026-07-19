@@ -283,11 +283,6 @@ def reusable_display_oi_data(upstoxResponse, title):
     # Show the default numeric index column (0,1,2,…) as requested
     st.dataframe(top_20.style.apply(highlight_top5, axis=1))
 
-reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
-reusable_display_oi_data(upstoxOiChangeResponse, "Nifty Change in OI")
-reusable_display_oi_data(upstoxSensexOiResponse, "Sensex Open Interest Data")
-reusable_display_oi_data(upstoxSensexOiChangeResponse, "Sensex Change in OI")
-
 # ==============================
 # GLOBAL CONFIG & TIMING
 # ==============================
@@ -649,7 +644,7 @@ def compute_oi_signal(oi_data_list, spot_price, change_oi_data_list=None, macro_
     }
 
 # ==============================
-# OI FLOW FETCHING & PARSING
+# OI FLOW FETCHING & PARSING (now returns dict instead of displaying)
 # ==============================
 def fetch_futures_data():
     url = 'https://api.upstox.com/v2/market/smartlist/futures'
@@ -709,15 +704,13 @@ def parse_futures_flow(data, title="OI Flow Details", key_prefix=None):
     else:
         final_score = weighted_score / total_value_weight
     final_score = max(-1, min(1, final_score))
-    st.subheader(f"{title} — Macro Score: {final_score:.2f}")
-    st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
-    indicator = "Bullish" if final_score > 0 else ("Bearish" if final_score < 0 else "Sideways")
-    st.write(f"Market Bias: {indicator}")
-    if rows:
-        st.dataframe(pd.DataFrame(rows))
-    else:
-        st.info(f"No {title.split(' OI')[0]} futures met the turnover threshold right now.")
-    return final_score
+    # Return dict instead of displaying directly
+    return {
+        "score": final_score,
+        "rows": rows,
+        "title": title,
+        "key_prefix": key_prefix
+    }
 
 # ==============================
 # FETCH ALL DATA (master symbols + OI Flow)
@@ -782,10 +775,14 @@ for s, res in results:
     else:
         final_display.append({"s": s, "close": 0, "pct": 0, "abs": 0, "prev": 0})
 
-# OI Flow
+# OI Flow - fetch and store results (we'll display later in the desired order)
 fetched_data = fetch_futures_data()
-nifty_macro_score = parse_futures_flow(fetched_data, title="Nifty OI Flow Details", key_prefix="NSE_FO")
-sensex_macro_score = parse_futures_flow(fetched_data, title="Sensex OI Flow Details", key_prefix="BSE_FO")
+nifty_flow_result = parse_futures_flow(fetched_data, title="Nifty OI Flow Details", key_prefix="NSE_FO")
+sensex_flow_result = parse_futures_flow(fetched_data, title="Sensex OI Flow Details", key_prefix="BSE_FO")
+
+# Store macro scores for Code 3
+nifty_macro_score = nifty_flow_result["score"]
+sensex_macro_score = sensex_flow_result["score"]
 
 momentum_score, momentum_label, momentum_pct = calculate_momentum_score(
     nifty_price, nifty_prev_close, momentum_lookback)
@@ -938,15 +935,153 @@ if nifty_price > 0 and nifty_prev_close > 0:
                           f"but Nifty Spot is squeezing up ({nifty_change_pct:+.2f}% / {nifty_actual_change:+.2f} pts).")
 
 # ==============================
-# UI RENDER
+# ADDED: Entry Signal from Nifty Change OI (Code 4)
 # ==============================
+def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_points=27):
+    """
+    Returns a dict with entry signal based on the highest OI difference strike.
+    """
+    if change_oi_response.get("status") != "success":
+        return None
+    data = change_oi_response.get("data", {})
+    items = data.get("call_put_oi_data_list", [])
+    if not items:
+        return None
+
+    # Find the item with max |put_change_oi - call_change_oi|
+    best_item = None
+    best_diff = -1
+    for item in items:
+        # use change OI fields; fallback to regular OI if missing
+        call_oi = item.get("call_change_oi", item.get("call_oi", 0))
+        put_oi = item.get("put_change_oi", item.get("put_oi", 0))
+        diff = abs(put_oi - call_oi)
+        if diff > best_diff:
+            best_diff = diff
+            best_item = item
+
+    if best_item is None:
+        return None
+
+    strike = best_item["strike_price"]
+    call_oi = best_item.get("call_change_oi", best_item.get("call_oi", 0))
+    put_oi = best_item.get("put_change_oi", best_item.get("put_oi", 0))
+
+    high_type = "HIGH PUT" if put_oi > call_oi else "HIGH CALL"
+
+    # Determine trigger and signal
+    if high_type == "HIGH PUT":
+        trigger_price = strike + buffer_points
+        signal = "BUY"
+        reason = f"Support at {strike} (Put OI > Call OI). Trigger at {trigger_price}"
+    else:  # HIGH CALL
+        trigger_price = strike - buffer_points
+        signal = "SELL"
+        reason = f"Resistance at {strike} (Call OI > Put OI). Trigger at {trigger_price}"
+
+    # Check if signal is active
+    active = False
+    if signal == "BUY" and spot_price >= trigger_price:
+        active = True
+    elif signal == "SELL" and spot_price <= trigger_price:
+        active = True
+
+    return {
+        "strike": strike,
+        "high_type": high_type,
+        "signal": signal,
+        "trigger_price": trigger_price,
+        "active": active,
+        "reason": reason,
+        "call_oi": call_oi,
+        "put_oi": put_oi,
+        "oi_diff": best_diff
+    }
+
+# Compute entry signal using the change OI response
+entry_signal = None
+if nifty_price > 0 and upstoxOiChangeResponse.get("status") == "success":
+    entry_signal = get_entry_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, buffer_points=27)
+
+# Get current IST datetime for entry time
+entry_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+# ==============================
+# UI RENDER - ORDERED AS REQUESTED
+# ==============================
+
+# 1. Title and Code 4 Card (top)
 st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
+
+st.subheader("📊 Code 4 — OI Change Entry Signal")
+if entry_signal:
+    signal = entry_signal["signal"]
+    active = entry_signal["active"]
+    emoji = "🟢" if signal == "BUY" else "🔴"
+    status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+    st.markdown(f"""
+    <div style="background: {'#d4edda' if active and signal=='BUY' else '#f8d7da' if active and signal=='SELL' else '#fff3cd'}; 
+                padding: 15px 20px; border-radius: 12px; border-left: 6px solid {'#28a745' if signal=='BUY' else '#dc3545'};
+                margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {entry_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{entry_signal['high_type']}</span>
+            </div>
+            <div style="font-weight: bold;">
+                <span style="color: {'#28a745' if active else '#856404'};">{status_text}</span>
+                <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
+            </div>
+        </div>
+        <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{entry_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {entry_signal['reason']}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.info("ℹ️ No Change OI data available to compute entry signal.")
+
+# 2. Nifty Open Interest Data
+reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
+
+# 3. Nifty Change in OI
+reusable_display_oi_data(upstoxOiChangeResponse, "Nifty Change in OI")
+
+# 4. Nifty OI Flow Details
+if nifty_flow_result["rows"]:
+    st.subheader(f"{nifty_flow_result['title']} — Macro Score: {nifty_flow_result['score']:.2f}")
+    st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
+    indicator = "Bullish" if nifty_flow_result["score"] > 0 else ("Bearish" if nifty_flow_result["score"] < 0 else "Sideways")
+    st.write(f"Market Bias: {indicator}")
+    st.dataframe(pd.DataFrame(nifty_flow_result["rows"]))
+else:
+    st.info("No Nifty futures met the turnover threshold right now.")
+
+# 5. Sensex Open Interest Data
+reusable_display_oi_data(upstoxSensexOiResponse, "Sensex Open Interest Data")
+
+# 6. Sensex Change in OI
+reusable_display_oi_data(upstoxSensexOiChangeResponse, "Sensex Change in OI")
+
+# 7. Sensex OI Flow Details
+if sensex_flow_result["rows"]:
+    st.subheader(f"{sensex_flow_result['title']} — Macro Score: {sensex_flow_result['score']:.2f}")
+    st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
+    indicator = "Bullish" if sensex_flow_result["score"] > 0 else ("Bearish" if sensex_flow_result["score"] < 0 else "Sideways")
+    st.write(f"Market Bias: {indicator}")
+    st.dataframe(pd.DataFrame(sensex_flow_result["rows"]))
+else:
+    st.info("No Sensex futures met the turnover threshold right now.")
+
+# 8. Divergence and VIX Alerts (after all tables)
 if divergence_detected:
     st.markdown(f'<div class="divergence-alert">{divergence_msg}</div>', unsafe_allow_html=True)
 if vix_warning:
     st.markdown(f'<div class="vix-alert">{vix_warning}</div>', unsafe_allow_html=True)
 
-# Pills row
+# 9. Pills row
 def pill(label, value, pct, invert=False):
     if pct is None:
         return f'<span class="indicator-pill pill-gray">{label}: —</span>'
@@ -983,7 +1118,7 @@ if "SELLING" in pressure_type:
 elif "BUYING" in pressure_type:
     st.success(f"✅ Domestic Buying Pressure Detected (Score: {pressure_score:.1f})")
 
-# Three columns
+# 10. Three prediction cards (Code 1, 2, 3)
 top_cols = st.columns(3)
 with top_cols[0]:
     st.subheader("📊 Code 1 — Global Weighted Predictor")
@@ -1043,7 +1178,7 @@ with top_cols[2]:
         </div>
     """, unsafe_allow_html=True)
 
-# Expander for signal reasoning
+# 11. Expander for signal reasoning
 with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", expanded=False):
     st.markdown("**Enhanced Code 2 factor-by-factor breakdown:**")
     for r in reasons_c2:
@@ -1059,10 +1194,12 @@ with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", 
     if "STRONG" in momentum_label and abs(nifty_change_pct) > 0.5:
         st.success(f"🚀 Strong momentum ({momentum_label}: {momentum_pct:+.2f}%) overrode signal threshold")
 
+# 12. Volatility alerts
 if volatility_alerts:
     items = "".join([f"<li>{a}</li>" for a in volatility_alerts])
     st.markdown(f'<div class="vix-alert">⚠️ High Volatility Moves:<ul>{items}</ul></div>', unsafe_allow_html=True)
 
+# 13. Live tracking table
 st.subheader("📈 Live Tracking — All Instruments")
 for i in range(0, len(final_display), 3):
     cols = st.columns(3)
