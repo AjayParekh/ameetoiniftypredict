@@ -1022,7 +1022,7 @@ if entry_signal:
     st.markdown(f"""
     <div style="background: {'#a5d6a7' if active and signal=='BUY' else '#ef9a9a' if active and signal=='SELL' else '#ffe082'}; 
                 padding: 15px 20px; border-radius: 12px; border-left: 6px solid {'#2e7d32' if signal=='BUY' else '#c62828'};
-                margin-bottom: 20px;">
+                margin-bottom: 20px; color: #000000;">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <div>
                 <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
@@ -1030,7 +1030,7 @@ if entry_signal:
                 <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{entry_signal['high_type']}</span>
             </div>
             <div style="font-weight: bold;">
-                <span style="color: {'#28a745' if active else '#856404'};">{status_text}</span>
+                <span style="color: #000000;">{status_text}</span>
                 <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
             </div>
         </div>
@@ -1042,6 +1042,9 @@ if entry_signal:
     """, unsafe_allow_html=True)
 else:
     st.info("ℹ️ No Change OI data available to compute entry signal.")
+
+
+
 
 # 2. Nifty Open Interest Data
 reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
