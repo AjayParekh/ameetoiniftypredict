@@ -998,10 +998,96 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
         "oi_diff": best_diff
     }
 
+# ==============================
+# ADDED: Exit Signal from Nifty Change OI (Code 4) with minimum gap check
+# ==============================
+def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal, buffer_points=27, min_gap=100):
+    """
+    Returns exit signal details based on the opposite OI change high type,
+    but only if the distance between entry trigger and exit trigger >= min_gap.
+    """
+    if change_oi_response.get("status") != "success":
+        return None
+    data = change_oi_response.get("data", {})
+    items = data.get("call_put_oi_data_list", [])
+    if not items:
+        return None
+
+    # Determine opposite high type
+    if entry_signal["signal"] == "BUY":
+        opposite_high_type = "HIGH CALL"
+    else:  # SELL
+        opposite_high_type = "HIGH PUT"
+
+    # Find item with max diff among those with opposite high type
+    best_item = None
+    best_diff = -1
+    for item in items:
+        call_oi = item.get("call_change_oi", item.get("call_oi", 0))
+        put_oi = item.get("put_change_oi", item.get("put_oi", 0))
+        high_type = "HIGH PUT" if put_oi > call_oi else "HIGH CALL"
+        if high_type == opposite_high_type:
+            diff = abs(put_oi - call_oi)
+            if diff > best_diff:
+                best_diff = diff
+                best_item = item
+
+    if best_item is None:
+        return None
+
+    strike = best_item["strike_price"]
+    call_oi = best_item.get("call_change_oi", best_item.get("call_oi", 0))
+    put_oi = best_item.get("put_change_oi", best_item.get("put_oi", 0))
+
+    # Determine trigger and signal for exit (opposite of entry)
+    if opposite_high_type == "HIGH PUT":
+        trigger_price = strike + buffer_points
+        exit_signal_type = "BUY"   # to exit a SELL position
+    else:  # HIGH CALL
+        trigger_price = strike - buffer_points
+        exit_signal_type = "SELL"  # to exit a BUY position
+
+    # --- MINIMUM GAP CHECK ---
+    entry_trigger = entry_signal["trigger_price"]
+    if abs(entry_trigger - trigger_price) < min_gap:
+        return None   # gap too small → no valid exit
+
+    # Check if price has crossed the trigger
+    active = False
+    if exit_signal_type == "BUY" and spot_price >= trigger_price:
+        active = True
+    elif exit_signal_type == "SELL" and spot_price <= trigger_price:
+        active = True
+
+    if opposite_high_type == "HIGH PUT":
+        reason = f"Exit BUY signal: Support at {strike} (Put OI > Call OI). Trigger at {trigger_price}"
+    else:
+        reason = f"Exit SELL signal: Resistance at {strike} (Call OI > Put OI). Trigger at {trigger_price}"
+
+    return {
+        "strike": strike,
+        "high_type": opposite_high_type,
+        "signal": exit_signal_type,
+        "trigger_price": trigger_price,
+        "active": active,
+        "reason": reason,
+        "call_oi": call_oi,
+        "put_oi": put_oi,
+        "oi_diff": best_diff
+    }
+
 # Compute entry signal using the change OI response
 entry_signal = None
 if nifty_price > 0 and upstoxOiChangeResponse.get("status") == "success":
     entry_signal = get_entry_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, buffer_points=27)
+
+# Compute exit signal with minimum gap check (100 points)
+exit_signal = None
+if entry_signal:
+    exit_signal = get_exit_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, entry_signal, buffer_points=27, min_gap=100)
+    # If exit is not valid (gap < 100 or no opposite OI), suppress entry as well
+    if exit_signal is None:
+        entry_signal = None
 
 # Get current IST datetime for entry time
 entry_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
@@ -1010,7 +1096,7 @@ entry_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 # UI RENDER - ORDERED AS REQUESTED
 # ==============================
 
-# 1. Title and Code 4 Card (top)
+# 1. Title and Code 4 Entry Card (top)
 st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
 
 st.subheader("📊 Code 4 — OI Change Entry Signal")
@@ -1041,10 +1127,44 @@ if entry_signal:
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("ℹ️ No Change OI data available to compute entry signal.")
+    st.info("ℹ️ No Change OI data available to compute entry signal (gap < 100 pts or no opposite OI).")
 
-
-
+# ------------------------------------------------------------
+# CODE 4 – EXIT SIGNAL
+# ------------------------------------------------------------
+st.subheader("📊 Code 4 — OI Change Exit Signal")
+if exit_signal:
+    signal = exit_signal["signal"]
+    active = exit_signal["active"]
+    # Use opposite emoji: exit BUY (to cover) is green, exit SELL (to close) is red
+    emoji = "🟢" if signal == "BUY" else "🔴"
+    status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+    # Use slightly different background tones for exit
+    bg_color = "#b3e5fc" if active and signal=="BUY" else "#ffccbc" if active and signal=="SELL" else "#fff9c4"
+    border_color = "#0277bd" if signal=="BUY" else "#d84315"
+    st.markdown(f"""
+    <div style="background: {bg_color}; 
+                padding: 15px 20px; border-radius: 12px; border-left: 6px solid {border_color};
+                margin-bottom: 20px; color: #000000;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {exit_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{exit_signal['high_type']}</span>
+            </div>
+            <div style="font-weight: bold;">
+                <span style="color: #000000;">{status_text}</span>
+                <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
+            </div>
+        </div>
+        <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{exit_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {exit_signal['reason']}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.info("ℹ️ No exit signal available (opposite OI build‑up not found or gap < 100 pts).")
 
 # 2. Nifty Open Interest Data
 reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
