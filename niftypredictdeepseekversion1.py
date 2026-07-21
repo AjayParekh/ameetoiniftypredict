@@ -1020,8 +1020,8 @@ if entry_signal:
     emoji = "🟢" if signal == "BUY" else "🔴"
     status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
     st.markdown(f"""
-    <div style="background: {'#d4edda' if active and signal=='BUY' else '#f8d7da' if active and signal=='SELL' else '#fff3cd'}; 
-                padding: 15px 20px; border-radius: 12px; border-left: 6px solid {'#28a745' if signal=='BUY' else '#dc3545'};
+    <div style="background: {'#a5d6a7' if active and signal=='BUY' else '#ef9a9a' if active and signal=='SELL' else '#ffe082'}; 
+                padding: 15px 20px; border-radius: 12px; border-left: 6px solid {'#2e7d32' if signal=='BUY' else '#c62828'};
                 margin-bottom: 20px;">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <div>
