@@ -726,6 +726,7 @@ sentiment_score_c1 = 0.0
 trigger_pcts_c2   = []
 
 nifty_price = nifty_prev_close = 0.0
+sensex_price = sensex_prev_close = 0.0  # <-- ADDED for Code 5
 vix_value   = 0.0
 usdinr_pct  = 0.0
 china_pct   = 0.0
@@ -744,6 +745,8 @@ for s, res in results:
         final_display.append({"s": s, "close": close, "pct": pct, "abs": change, "prev": prev})
         if s["name"] == "NIFTY 50":
             nifty_price, nifty_prev_close = close, prev
+        elif s["name"] == "SENSEX":                     # <-- ADDED
+            sensex_price, sensex_prev_close = close, prev
         elif s["name"] == "VIX":
             vix_value = close
         elif s["name"] == "India VIX":
@@ -935,8 +938,10 @@ if nifty_price > 0 and nifty_prev_close > 0:
                           f"but Nifty Spot is squeezing up ({nifty_change_pct:+.2f}% / {nifty_actual_change:+.2f} pts).")
 
 # ==============================
-# ADDED: Entry Signal from Nifty Change OI (Code 4)
+# Code 4 & 5 – OI Change Entry/Exit (Nifty & Sensex)
 # ==============================
+
+# --- Helper functions (generic for any index) ---
 def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_points=27):
     """
     Returns a dict with entry signal based on the highest OI difference strike.
@@ -948,11 +953,9 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
     if not items:
         return None
 
-    # Find the item with max |put_change_oi - call_change_oi|
     best_item = None
     best_diff = -1
     for item in items:
-        # use change OI fields; fallback to regular OI if missing
         call_oi = item.get("call_change_oi", item.get("call_oi", 0))
         put_oi = item.get("put_change_oi", item.get("put_oi", 0))
         diff = abs(put_oi - call_oi)
@@ -969,17 +972,15 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
 
     high_type = "HIGH PUT" if put_oi > call_oi else "HIGH CALL"
 
-    # Determine trigger and signal
     if high_type == "HIGH PUT":
         trigger_price = strike + buffer_points
         signal = "BUY"
         reason = f"Support at {strike} (Put OI > Call OI). Trigger at {trigger_price}"
-    else:  # HIGH CALL
+    else:
         trigger_price = strike - buffer_points
         signal = "SELL"
         reason = f"Resistance at {strike} (Call OI > Put OI). Trigger at {trigger_price}"
 
-    # Check if signal is active
     active = False
     if signal == "BUY" and spot_price >= trigger_price:
         active = True
@@ -998,9 +999,6 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
         "oi_diff": best_diff
     }
 
-# ==============================
-# ADDED: Exit Signal from Nifty Change OI (Code 4) with minimum gap check
-# ==============================
 def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal, buffer_points=27, min_gap=100):
     """
     Returns exit signal details based on the opposite OI change high type,
@@ -1013,13 +1011,11 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
     if not items:
         return None
 
-    # Determine opposite high type
     if entry_signal["signal"] == "BUY":
         opposite_high_type = "HIGH CALL"
-    else:  # SELL
+    else:
         opposite_high_type = "HIGH PUT"
 
-    # Find item with max diff among those with opposite high type
     best_item = None
     best_diff = -1
     for item in items:
@@ -1039,20 +1035,17 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
     call_oi = best_item.get("call_change_oi", best_item.get("call_oi", 0))
     put_oi = best_item.get("put_change_oi", best_item.get("put_oi", 0))
 
-    # Determine trigger and signal for exit (opposite of entry)
     if opposite_high_type == "HIGH PUT":
         trigger_price = strike + buffer_points
-        exit_signal_type = "BUY"   # to exit a SELL position
-    else:  # HIGH CALL
+        exit_signal_type = "BUY"
+    else:
         trigger_price = strike - buffer_points
-        exit_signal_type = "SELL"  # to exit a BUY position
+        exit_signal_type = "SELL"
 
-    # --- MINIMUM GAP CHECK ---
     entry_trigger = entry_signal["trigger_price"]
     if abs(entry_trigger - trigger_price) < min_gap:
-        return None   # gap too small → no valid exit
+        return None
 
-    # Check if price has crossed the trigger
     active = False
     if exit_signal_type == "BUY" and spot_price >= trigger_price:
         active = True
@@ -1076,33 +1069,50 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
         "oi_diff": best_diff
     }
 
-# Compute entry signal using the change OI response
-entry_signal = None
+# ==============================
+# COMPUTE NIFTY SIGNALS (Code 4)
+# ==============================
+nifty_entry_signal = None
 if nifty_price > 0 and upstoxOiChangeResponse.get("status") == "success":
-    entry_signal = get_entry_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, buffer_points=27)
+    nifty_entry_signal = get_entry_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, buffer_points=27)
 
-# Compute exit signal with minimum gap check (100 points)
-exit_signal = None
-if entry_signal:
-    exit_signal = get_exit_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, entry_signal, buffer_points=27, min_gap=100)
-    # If exit is not valid (gap < 100 or no opposite OI), suppress entry as well
-    if exit_signal is None:
-        entry_signal = None
+nifty_exit_signal = None
+if nifty_entry_signal:
+    nifty_exit_signal = get_exit_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, nifty_entry_signal, buffer_points=27, min_gap=100)
+    if nifty_exit_signal is None:
+        nifty_entry_signal = None
 
-# Get current IST datetime for entry time
+# ==============================
+# COMPUTE SENSEX SIGNALS (Code 5)
+# ==============================
+sensex_entry_signal = None
+if sensex_price > 0 and upstoxSensexOiChangeResponse.get("status") == "success":
+    sensex_entry_signal = get_entry_signal_from_change_oi(upstoxSensexOiChangeResponse, sensex_price, buffer_points=27)
+
+sensex_exit_signal = None
+if sensex_entry_signal:
+    sensex_exit_signal = get_exit_signal_from_change_oi(upstoxSensexOiChangeResponse, sensex_price, sensex_entry_signal, buffer_points=27, min_gap=100)
+    if sensex_exit_signal is None:
+        sensex_entry_signal = None
+
+# ==============================
+# TIMESTAMP
+# ==============================
 entry_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
 # ==============================
-# UI RENDER - ORDERED AS REQUESTED
+# UI RENDER
 # ==============================
 
-# 1. Title and Code 4 Entry Card (top)
 st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
 
-st.subheader("📊 Code 4 — OI Change Entry Signal")
-if entry_signal:
-    signal = entry_signal["signal"]
-    active = entry_signal["active"]
+# ----------------------------------------------------------------------
+# CODE 4 – NIFTY ENTRY & EXIT
+# ----------------------------------------------------------------------
+st.subheader("📊 Code 4 — Nifty OI Change Entry Signal")
+if nifty_entry_signal:
+    signal = nifty_entry_signal["signal"]
+    active = nifty_entry_signal["active"]
     emoji = "🟢" if signal == "BUY" else "🔴"
     status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
     st.markdown(f"""
@@ -1112,8 +1122,8 @@ if entry_signal:
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <div>
                 <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
-                <span style="margin-left: 15px; font-size: 1.2rem;">at {entry_signal['trigger_price']:,.2f}</span>
-                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{entry_signal['high_type']}</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_entry_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{nifty_entry_signal['high_type']}</span>
             </div>
             <div style="font-weight: bold;">
                 <span style="color: #000000;">{status_text}</span>
@@ -1121,25 +1131,20 @@ if entry_signal:
             </div>
         </div>
         <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{entry_signal['oi_diff']:,.0f}</b></span>
-            <span style="margin-left: 20px;">📌 {entry_signal['reason']}</span>
+            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{nifty_entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{nifty_entry_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {nifty_entry_signal['reason']}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("ℹ️ No Change OI data available to compute entry signal (gap < 100 pts or no opposite OI).")
+    st.info("ℹ️ No Nifty Change OI entry signal (gap < 100 pts or no opposite OI).")
 
-# ------------------------------------------------------------
-# CODE 4 – EXIT SIGNAL
-# ------------------------------------------------------------
-st.subheader("📊 Code 4 — OI Change Exit Signal")
-if exit_signal:
-    signal = exit_signal["signal"]
-    active = exit_signal["active"]
-    # Use opposite emoji: exit BUY (to cover) is green, exit SELL (to close) is red
+st.subheader("📊 Code 4 — Nifty OI Change Exit Signal")
+if nifty_exit_signal:
+    signal = nifty_exit_signal["signal"]
+    active = nifty_exit_signal["active"]
     emoji = "🟢" if signal == "BUY" else "🔴"
     status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
-    # Use slightly different background tones for exit
     bg_color = "#b3e5fc" if active and signal=="BUY" else "#ffccbc" if active and signal=="SELL" else "#fff9c4"
     border_color = "#0277bd" if signal=="BUY" else "#d84315"
     st.markdown(f"""
@@ -1149,8 +1154,8 @@ if exit_signal:
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <div>
                 <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
-                <span style="margin-left: 15px; font-size: 1.2rem;">at {exit_signal['trigger_price']:,.2f}</span>
-                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{exit_signal['high_type']}</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_exit_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{nifty_exit_signal['high_type']}</span>
             </div>
             <div style="font-weight: bold;">
                 <span style="color: #000000;">{status_text}</span>
@@ -1158,13 +1163,82 @@ if exit_signal:
             </div>
         </div>
         <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{exit_signal['oi_diff']:,.0f}</b></span>
-            <span style="margin-left: 20px;">📌 {exit_signal['reason']}</span>
+            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{nifty_exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{nifty_exit_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {nifty_exit_signal['reason']}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("ℹ️ No exit signal available (opposite OI build‑up not found or gap < 100 pts).")
+    st.info("ℹ️ No Nifty exit signal available (opposite OI build‑up not found or gap < 100 pts).")
+
+# ----------------------------------------------------------------------
+# CODE 5 – SENSEX ENTRY & EXIT
+# ----------------------------------------------------------------------
+st.subheader("📊 Code 5 — Sensex OI Change Entry Signal")
+if sensex_entry_signal:
+    signal = sensex_entry_signal["signal"]
+    active = sensex_entry_signal["active"]
+    emoji = "🟢" if signal == "BUY" else "🔴"
+    status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+    st.markdown(f"""
+    <div style="background: {'#a5d6a7' if active and signal=='BUY' else '#ef9a9a' if active and signal=='SELL' else '#ffe082'}; 
+                padding: 15px 20px; border-radius: 12px; border-left: 6px solid {'#2e7d32' if signal=='BUY' else '#c62828'};
+                margin-bottom: 20px; color: #000000;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {sensex_entry_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{sensex_entry_signal['high_type']}</span>
+            </div>
+            <div style="font-weight: bold;">
+                <span style="color: #000000;">{status_text}</span>
+                <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
+            </div>
+        </div>
+        <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+            <span>📊 Current Sensex: <b>{sensex_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{sensex_entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{sensex_entry_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {sensex_entry_signal['reason']}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.info("ℹ️ No Sensex Change OI entry signal (gap < 100 pts or no opposite OI).")
+
+st.subheader("📊 Code 5 — Sensex OI Change Exit Signal")
+if sensex_exit_signal:
+    signal = sensex_exit_signal["signal"]
+    active = sensex_exit_signal["active"]
+    emoji = "🟢" if signal == "BUY" else "🔴"
+    status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+    bg_color = "#b3e5fc" if active and signal=="BUY" else "#ffccbc" if active and signal=="SELL" else "#fff9c4"
+    border_color = "#0277bd" if signal=="BUY" else "#d84315"
+    st.markdown(f"""
+    <div style="background: {bg_color}; 
+                padding: 15px 20px; border-radius: 12px; border-left: 6px solid {border_color};
+                margin-bottom: 20px; color: #000000;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {sensex_exit_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{sensex_exit_signal['high_type']}</span>
+            </div>
+            <div style="font-weight: bold;">
+                <span style="color: #000000;">{status_text}</span>
+                <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
+            </div>
+        </div>
+        <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+            <span>📊 Current Sensex: <b>{sensex_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{sensex_exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{sensex_exit_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {sensex_exit_signal['reason']}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.info("ℹ️ No Sensex exit signal available (opposite OI build‑up not found or gap < 100 pts).")
+
+# ==============================
+# REST OF THE DASHBOARD (Tables, alerts, predictors, etc.)
+# ==============================
 
 # 2. Nifty Open Interest Data
 reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
@@ -1198,7 +1272,7 @@ if sensex_flow_result["rows"]:
 else:
     st.info("No Sensex futures met the turnover threshold right now.")
 
-# 8. Divergence and VIX Alerts (after all tables)
+# 8. Divergence and VIX Alerts
 if divergence_detected:
     st.markdown(f'<div class="divergence-alert">{divergence_msg}</div>', unsafe_allow_html=True)
 if vix_warning:
@@ -1357,7 +1431,7 @@ for i in range(0, len(final_display), 3):
                     """, unsafe_allow_html=True)
 
 # ==============================
-# NEWS (optional, not used in prediction)
+# NEWS (optional)
 # ==============================
 def fetch_news_data():
     url = 'https://api.upstox.com/v2/news'
