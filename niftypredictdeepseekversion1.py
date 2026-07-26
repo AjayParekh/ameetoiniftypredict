@@ -1418,63 +1418,66 @@ if index_selection == "Nifty":
     st.markdown("---")
     st.subheader("📊 Prediction Models (Code 2, 3, 4)")
 
-    # Code 2: Global Weighted Predictor (was Code 1)
-    st.subheader("📊 Code 2 — Global Weighted Predictor")
-    status_c1 = "Achieved" if (
-        (sentiment_score_c1 > 0.01 and nifty_price >= target_price_c1) or
-        (sentiment_score_c1 < -0.01 and nifty_price <= target_price_c1)
-    ) else "Pending"
-    achieved_class = "prediction-achieved" if status_c1 == "Achieved" else ""
-    vix_note = f" | US VIX dampener: {us_vix_dampener:.0%} | India VIX: {india_vix_dampener:.0%}" if combined_dampener < 1.0 else ""
-    st.markdown(f"""
-        <div class="prediction-box {achieved_class}" style="min-height: 240px;">
-            <div class="status-badge">{'ACTIVE' if not divergence_detected else 'DIVERTED'}</div>
-            <p style="margin:0; opacity:0.8; font-size:0.9rem;">Weighted Global Sentiment (VIX-adjusted){vix_note}</p>
-            <h2 style="margin:5px 0; font-size:2rem;">{pred_text_c1} ({sentiment_score_c1:+.2f})</h2>
-            <div style="display:flex; justify-content:center; gap:20px; margin-top:12px; font-weight:bold; font-size:1.1rem;">
-                <span>🎯 Target: {target_price_c1:,.2f}</span>
-                <span>↕️ {pred_change_c1:+.2f} pts</span>
-                <span>📊 {pred_pct_c1:+.2f}%</span>
+    # Use columns to display Code 2, 3, 4 side by side
+    col2, col3, col4 = st.columns(3)
+
+    with col2:
+        st.subheader("📊 Code 2 — Global Weighted Predictor")
+        status_c1 = "Achieved" if (
+            (sentiment_score_c1 > 0.01 and nifty_price >= target_price_c1) or
+            (sentiment_score_c1 < -0.01 and nifty_price <= target_price_c1)
+        ) else "Pending"
+        achieved_class = "prediction-achieved" if status_c1 == "Achieved" else ""
+        vix_note = f" | US VIX dampener: {us_vix_dampener:.0%} | India VIX: {india_vix_dampener:.0%}" if combined_dampener < 1.0 else ""
+        st.markdown(f"""
+            <div class="prediction-box {achieved_class}" style="min-height: 240px;">
+                <div class="status-badge">{'ACTIVE' if not divergence_detected else 'DIVERTED'}</div>
+                <p style="margin:0; opacity:0.8; font-size:0.9rem;">Weighted Global Sentiment (VIX-adjusted){vix_note}</p>
+                <h2 style="margin:5px 0; font-size:2rem;">{pred_text_c1} ({sentiment_score_c1:+.2f})</h2>
+                <div style="display:flex; justify-content:center; gap:20px; margin-top:12px; font-weight:bold; font-size:1.1rem;">
+                    <span>🎯 Target: {target_price_c1:,.2f}</span>
+                    <span>↕️ {pred_change_c1:+.2f} pts</span>
+                    <span>📊 {pred_pct_c1:+.2f}%</span>
+                </div>
+                <p style="font-size:0.82rem; margin-top:8px; opacity:0.7;">Raw sentiment: {raw_sentiment:+.2f}% | Prev Close: {nifty_prev_close:,.2f} | Current: {nifty_price:,.2f} ({nifty_change_pct:+.2f}%)</p>
+                <div class="confidence-tag">Confidence: {confidence:.1f}%</div>
+                <div style="margin-top:10px; font-size:1.1rem;">Status: <b>{status_c1}</b></div>
             </div>
-            <p style="font-size:0.82rem; margin-top:8px; opacity:0.7;">Raw sentiment: {raw_sentiment:+.2f}% | Prev Close: {nifty_prev_close:,.2f} | Current: {nifty_price:,.2f} ({nifty_change_pct:+.2f}%)</p>
-            <div class="confidence-tag">Confidence: {confidence:.1f}%</div>
-            <div style="margin-top:10px; font-size:1.1rem;">Status: <b>{status_c1}</b></div>
-        </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
-    # Code 3: Multi-Factor Signal Engine (was Code 2)
-    st.subheader("⚖️ Code 3 — Multi-Factor Signal Engine")
-    box2_badge = "WAITING" if not is_after_china else ("🚀 STRONG SIGNAL" if signal_strength == "STRONG" else ("📊 MODERATE" if signal_strength == "MODERATE" else "⏸️ WEAK / NO CONF"))
-    score_bar = "█" * score_c2 + "░" * (5 - score_c2)
-    st.markdown(f"""
-        <div class="prediction-card {card_class_c2}" style="min-height:240px; padding:20px;">
-            <div class="status-badge">{box2_badge}</div>
-            <h2 style="margin:0; font-size:2rem;">{prediction_c2} — {signal_strength}</h2>
-            <div class="signal-score-bar">Signal Score: {score_bar} {score_c2}/5 &nbsp;|&nbsp; 🟢 {bull_votes_c2} vs 🔴 {bear_votes_c2} &nbsp;|&nbsp; 🚀 {momentum_label}</div>
-            <div class="price-large" style="font-size:2.1rem; margin:6px 0;">Target: {target_c2:,.2f}</div>
-            <div class="move-text" style="font-size:1.1rem; margin-bottom:5px;">Move: {points_move_c2:+,.2f} pts ({display_move_pct_c2:+.2f}%) &nbsp;[Dynamic Blend]</div>
-            <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">STOP LOSS: {stop_loss_c2:,.2f}</div>
-            <p style="margin-top:10px; font-size:0.82rem; opacity:0.8;">Ref Prev Close: {nifty_prev_close:,.2f} | Current: {nifty_price:,.2f}</p>
-        </div>
-    """, unsafe_allow_html=True)
+    with col3:
+        st.subheader("⚖️ Code 3 — Multi-Factor Signal Engine")
+        box2_badge = "WAITING" if not is_after_china else ("🚀 STRONG SIGNAL" if signal_strength == "STRONG" else ("📊 MODERATE" if signal_strength == "MODERATE" else "⏸️ WEAK / NO CONF"))
+        score_bar = "█" * score_c2 + "░" * (5 - score_c2)
+        st.markdown(f"""
+            <div class="prediction-card {card_class_c2}" style="min-height:240px; padding:20px;">
+                <div class="status-badge">{box2_badge}</div>
+                <h2 style="margin:0; font-size:2rem;">{prediction_c2} — {signal_strength}</h2>
+                <div class="signal-score-bar">Signal Score: {score_bar} {score_c2}/5 &nbsp;|&nbsp; 🟢 {bull_votes_c2} vs 🔴 {bear_votes_c2} &nbsp;|&nbsp; 🚀 {momentum_label}</div>
+                <div class="price-large" style="font-size:2.1rem; margin:6px 0;">Target: {target_c2:,.2f}</div>
+                <div class="move-text" style="font-size:1.1rem; margin-bottom:5px;">Move: {points_move_c2:+,.2f} pts ({display_move_pct_c2:+.2f}%) &nbsp;[Dynamic Blend]</div>
+                <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">STOP LOSS: {stop_loss_c2:,.2f}</div>
+                <p style="margin-top:10px; font-size:0.82rem; opacity:0.8;">Ref Prev Close: {nifty_prev_close:,.2f} | Current: {nifty_price:,.2f}</p>
+            </div>
+        """, unsafe_allow_html=True)
 
-    # Code 4: OI + Change OI + Flow (was Code 3)
-    st.subheader("📊 Code 4 — OI + Change OI + Flow")
-    net_change_str = f"Δ Calls: {oi_signal['net_call_change']:+,.0f} | Δ Puts: {oi_signal['net_put_change']:+,.0f}"
-    macro_str = f"Flow Score: {oi_signal['macro_flow_score']:+.2f}" if oi_signal['macro_flow_score'] is not None else "Flow: N/A"
-    st.markdown(f"""
-        <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
-            <div class="status-badge">OI + FLOW SIGNAL</div>
-            <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
-            <div style="margin:6px 0; font-size:0.9rem;">Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp; PCR: {oi_signal['pcr']:.2f}</div>
-            <div style="font-size:0.85rem; margin-bottom:5px; opacity:0.9;">{net_change_str}<br>{macro_str}</div>
-            <div class="price-large" style="font-size:2.1rem; margin:6px 0;">Target: {oi_signal['target']:,.2f}</div>
-            <div style="font-size:0.9rem; margin-bottom:5px;">S: {oi_signal['support']:,.2f} &nbsp;|&nbsp; R: {oi_signal['resistance']:,.2f}
-            <br>Chg‑S: {oi_signal['max_put_change_strike'] if oi_signal['max_put_change_strike'] else '—'} &nbsp;|&nbsp; Chg‑R: {oi_signal['max_call_change_strike'] if oi_signal['max_call_change_strike'] else '—'}</div>
-            <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">STOP: {oi_signal['stop_loss']:,.2f}</div>
-            <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']} &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%</div>
-        </div>
-    """, unsafe_allow_html=True)
+    with col4:
+        st.subheader("📊 Code 4 — OI + Change OI + Flow")
+        net_change_str = f"Δ Calls: {oi_signal['net_call_change']:+,.0f} | Δ Puts: {oi_signal['net_put_change']:+,.0f}"
+        macro_str = f"Flow Score: {oi_signal['macro_flow_score']:+.2f}" if oi_signal['macro_flow_score'] is not None else "Flow: N/A"
+        st.markdown(f"""
+            <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
+                <div class="status-badge">OI + FLOW SIGNAL</div>
+                <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
+                <div style="margin:6px 0; font-size:0.9rem;">Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp; PCR: {oi_signal['pcr']:.2f}</div>
+                <div style="font-size:0.85rem; margin-bottom:5px; opacity:0.9;">{net_change_str}<br>{macro_str}</div>
+                <div class="price-large" style="font-size:2.1rem; margin:6px 0;">Target: {oi_signal['target']:,.2f}</div>
+                <div style="font-size:0.9rem; margin-bottom:5px;">S: {oi_signal['support']:,.2f} &nbsp;|&nbsp; R: {oi_signal['resistance']:,.2f}
+                <br>Chg‑S: {oi_signal['max_put_change_strike'] if oi_signal['max_put_change_strike'] else '—'} &nbsp;|&nbsp; Chg‑R: {oi_signal['max_call_change_strike'] if oi_signal['max_call_change_strike'] else '—'}</div>
+                <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">STOP: {oi_signal['stop_loss']:,.2f}</div>
+                <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']} &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%</div>
+            </div>
+        """, unsafe_allow_html=True)
 
     # ---- Expander for signal reasoning (placed after Code 3, since it refers to Code 3) ----
     with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", expanded=False):
