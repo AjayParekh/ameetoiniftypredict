@@ -128,6 +128,59 @@ st.markdown("""
         display: inline-block; padding: 3px 12px; border-radius: 15px;
         font-size: 0.8rem; font-weight: bold; margin-left: 8px;
     }
+    /* New styles for Code 1 boxes */
+    .entry-box {
+        padding: 15px 20px;
+        border-radius: 12px;
+        margin-bottom: 20px;
+        color: #000000;
+        border-left: 6px solid;
+    }
+    .entry-box .status-badge-dark {
+        background: rgba(0,0,0,0.6);
+        color: white;
+        padding: 2px 10px;
+        border-radius: 8px;
+        font-size: 0.75rem;
+        font-weight: bold;
+        text-transform: uppercase;
+        margin-left: 10px;
+    }
+    .entry-box .status-text {
+        font-weight: bold;
+    }
+    .greeks-panel {
+        background: white;
+        padding: 12px 18px;
+        border-radius: 10px;
+        border-left: 5px solid;
+        margin-bottom: 15px;
+        color: #000;
+    }
+    .greeks-panel .badge-pass {
+        background-color: #2e7d32;
+        color: white;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-weight: bold;
+        font-size: 0.8rem;
+    }
+    .greeks-panel .badge-weak {
+        background-color: #f9a825;
+        color: #000;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-weight: bold;
+        font-size: 0.8rem;
+    }
+    .greeks-panel .greek-item {
+        display: inline-block;
+        margin-right: 20px;
+        font-size: 0.9rem;
+    }
+    .greeks-panel .greek-item b {
+        color: #1a1a1a;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -1234,18 +1287,19 @@ def render_greeks_panel(signal_data, label):
         delta, gamma, theta, vega, iv, leg = g["call_delta"], g["call_gamma"], g["call_theta"], g["call_vega"], g["call_iv"], "CALL"
 
     color = "#2e7d32" if conf >= 60 else "#f9a825" if conf >= 35 else "#c62828"
-    badge = "✅ PASSES DELTA FILTER" if signal_data.get("delta_ok", True) else "⚠️ WEAK — OUTSIDE DELTA BAND"
+    badge_class = "badge-pass" if signal_data.get("delta_ok", True) else "badge-weak"
+    badge_text = "✅ PASSES DELTA FILTER" if signal_data.get("delta_ok", True) else "⚠️ WEAK — OUTSIDE DELTA BAND"
 
     st.markdown(f"""
-    <div style="background:#f5f5f5; padding:12px 18px; border-radius:10px; border-left:5px solid {color}; margin-bottom:15px;">
-        <b>{leg} Greeks @ {signal_data['strike']}</b> &nbsp;|&nbsp; <span style="color:{color}; font-weight:bold;">{badge}</span>
+    <div class="greeks-panel" style="border-left-color: {color};">
+        <b>{leg} Greeks @ {signal_data['strike']}</b> &nbsp;|&nbsp; <span class="{badge_class}">{badge_text}</span>
         <div style="display:flex; gap:20px; margin-top:6px; font-size:0.9rem; flex-wrap:wrap;">
-            <span>Δ Delta: <b>{delta:.3f}</b></span>
-            <span>Γ Gamma: <b>{gamma:.5f}</b></span>
-            <span>Θ Theta: <b>{theta:.2f}</b></span>
-            <span>V Vega: <b>{vega:.2f}</b></span>
-            <span>IV: <b>{iv:.1f}%</b></span>
-            <span>Greeks Confidence: <b>{conf:.0f}%</b></span>
+            <span class="greek-item">Δ Delta: <b>{delta:.3f}</b></span>
+            <span class="greek-item">Γ Gamma: <b>{gamma:.5f}</b></span>
+            <span class="greek-item">Θ Theta: <b>{theta:.2f}</b></span>
+            <span class="greek-item">V Vega: <b>{vega:.2f}</b></span>
+            <span class="greek-item">IV: <b>{iv:.1f}%</b></span>
+            <span class="greek-item">Greeks Confidence: <b>{conf:.0f}%</b></span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1280,18 +1334,27 @@ if index_selection == "Nifty":
         active = nifty_entry_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
         status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        # Background color: green for active BUY, red for active SELL, amber for pending
+        if active and signal == "BUY":
+            bg_color = "#2e7d32"
+            text_color = "white"
+        elif active and signal == "SELL":
+            bg_color = "#c62828"
+            text_color = "white"
+        else:
+            bg_color = "#f9a825"
+            text_color = "black"
+        border_color = "#2e7d32" if signal == "BUY" else "#c62828"
         st.markdown(f"""
-        <div style="background: {'#a5d6a7' if active and signal=='BUY' else '#ef9a9a' if active and signal=='SELL' else '#ffe082'}; 
-                    padding: 15px 20px; border-radius: 12px; border-left: 6px solid {'#2e7d32' if signal=='BUY' else '#c62828'};
-                    margin-bottom: 20px; color: #000000;">
+        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
                 <div>
                     <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
                     <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_entry_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{nifty_entry_signal['high_type']}</span>
+                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{nifty_entry_signal['high_type']}</span>
                 </div>
                 <div style="font-weight: bold;">
-                    <span style="color: #000000;">{status_text}</span>
+                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
                     <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
                 </div>
             </div>
@@ -1311,20 +1374,19 @@ if index_selection == "Nifty":
         active = nifty_exit_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
         status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
-        bg_color = "#b3e5fc" if active and signal=="BUY" else "#ffccbc" if active and signal=="SELL" else "#fff9c4"
+        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
+        text_color = "white" if active else "black"
         border_color = "#0277bd" if signal=="BUY" else "#d84315"
         st.markdown(f"""
-        <div style="background: {bg_color}; 
-                    padding: 15px 20px; border-radius: 12px; border-left: 6px solid {border_color};
-                    margin-bottom: 20px; color: #000000;">
+        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
                 <div>
                     <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
                     <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_exit_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{nifty_exit_signal['high_type']}</span>
+                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{nifty_exit_signal['high_type']}</span>
                 </div>
                 <div style="font-weight: bold;">
-                    <span style="color: #000000;">{status_text}</span>
+                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
                     <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
                 </div>
             </div>
@@ -1442,18 +1504,19 @@ elif index_selection == "Sensex":
         active = sensex_entry_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
         status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
+        text_color = "white" if active else "black"
+        border_color = "#2e7d32" if signal=="BUY" else "#c62828"
         st.markdown(f"""
-        <div style="background: {'#a5d6a7' if active and signal=='BUY' else '#ef9a9a' if active and signal=='SELL' else '#ffe082'}; 
-                    padding: 15px 20px; border-radius: 12px; border-left: 6px solid {'#2e7d32' if signal=='BUY' else '#c62828'};
-                    margin-bottom: 20px; color: #000000;">
+        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
                 <div>
                     <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
                     <span style="margin-left: 15px; font-size: 1.2rem;">at {sensex_entry_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{sensex_entry_signal['high_type']}</span>
+                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{sensex_entry_signal['high_type']}</span>
                 </div>
                 <div style="font-weight: bold;">
-                    <span style="color: #000000;">{status_text}</span>
+                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
                     <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
                 </div>
             </div>
@@ -1473,20 +1536,19 @@ elif index_selection == "Sensex":
         active = sensex_exit_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
         status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
-        bg_color = "#b3e5fc" if active and signal=="BUY" else "#ffccbc" if active and signal=="SELL" else "#fff9c4"
+        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
+        text_color = "white" if active else "black"
         border_color = "#0277bd" if signal=="BUY" else "#d84315"
         st.markdown(f"""
-        <div style="background: {bg_color}; 
-                    padding: 15px 20px; border-radius: 12px; border-left: 6px solid {border_color};
-                    margin-bottom: 20px; color: #000000;">
+        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
                 <div>
                     <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
                     <span style="margin-left: 15px; font-size: 1.2rem;">at {sensex_exit_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.1); padding: 2px 10px; border-radius: 20px;">{sensex_exit_signal['high_type']}</span>
+                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{sensex_exit_signal['high_type']}</span>
                 </div>
                 <div style="font-weight: bold;">
-                    <span style="color: #000000;">{status_text}</span>
+                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
                     <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
                 </div>
             </div>
