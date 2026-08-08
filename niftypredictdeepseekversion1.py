@@ -11,6 +11,7 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 import json
+import calendar
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
@@ -211,6 +212,26 @@ days_until_thursday = (3 - ist_now.weekday()) % 7  # Monday=0 ... Thursday=3
 sensex_expiry_date = ist_now + dt_mod.timedelta(days=days_until_thursday)
 sensex_expiry_str = sensex_expiry_date.strftime('%Y-%m-%d')
 
+# BankNifty expiry — NSE moved BankNifty to MONTHLY-only expiry (last Tuesday of the month);
+# it no longer shares Nifty's weekly Tuesday cycle.
+def _last_weekday_of_month(year, month, weekday):
+    """weekday: Monday=0 ... Sunday=6. Returns the last occurrence of that weekday in the given month."""
+    last_day = calendar.monthrange(year, month)[1]
+    d = dt_mod.date(year, month, last_day)
+    offset = (d.weekday() - weekday) % 7
+    return d - dt_mod.timedelta(days=offset)
+
+_today_date = ist_now.date()
+_banknifty_expiry_date = _last_weekday_of_month(_today_date.year, _today_date.month, 1)  # 1 = Tuesday
+if _banknifty_expiry_date < _today_date:
+    _next_month = _today_date.month + 1
+    _next_year = _today_date.year
+    if _next_month > 12:
+        _next_month = 1
+        _next_year += 1
+    _banknifty_expiry_date = _last_weekday_of_month(_next_year, _next_month, 1)
+banknifty_expiry_str = _banknifty_expiry_date.strftime('%Y-%m-%d')
+
 def fetch_upstox_oi_change_data():
     url = 'https://api.upstox.com/v2/market/change-oi'
     params = {
@@ -281,6 +302,41 @@ def fetch_upstox_sensex_oi_data():
     return json.loads(response.text)
 
 upstoxSensexOiResponse = fetch_upstox_sensex_oi_data()
+
+def fetch_upstox_banknifty_oi_change_data():
+    url = 'https://api.upstox.com/v2/market/change-oi'
+    params = {
+        'instrument_key': 'NSE_INDEX|Nifty Bank',
+        'expiry': banknifty_expiry_str,
+        'date': today_str,
+        'interval': 2
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': access_token
+    }
+    response = requests.get(url, params=params, headers=headers)
+    return json.loads(response.text)
+
+upstoxBankNiftyOiChangeResponse = fetch_upstox_banknifty_oi_change_data()
+
+def fetch_upstox_banknifty_oi_data():
+    url = 'https://api.upstox.com/v2/market/oi'
+    params = {
+        'instrument_key': 'NSE_INDEX|Nifty Bank',
+        'expiry': banknifty_expiry_str,
+        'date': today_str
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': access_token
+    }
+    response = requests.get(url, params=params, headers=headers)
+    return json.loads(response.text)
+
+upstoxBankNiftyOiResponse = fetch_upstox_banknifty_oi_data()
 
 # ==============================
 # OPTION CHAIN + GREEKS (Delta / Gamma / Theta / Vega / IV)
@@ -369,6 +425,9 @@ nifty_greeks_by_strike = parse_greeks_by_strike(nifty_option_chain_response)
 sensex_option_chain_response = fetch_option_chain('BSE_INDEX|SENSEX', sensex_expiry_str)
 sensex_greeks_by_strike = parse_greeks_by_strike(sensex_option_chain_response)
 
+banknifty_option_chain_response = fetch_option_chain('NSE_INDEX|Nifty Bank', banknifty_expiry_str)
+banknifty_greeks_by_strike = parse_greeks_by_strike(banknifty_option_chain_response)
+
 def reusable_display_oi_data(upstoxResponse, title):
     data = upstoxResponse["data"]
     Total_Puts = 0
@@ -445,9 +504,9 @@ with st.sidebar:
     # Index selector
     index_selection = st.radio(
         "Select Index",
-        ["Nifty", "Sensex"],
+        ["Nifty", "Sensex", "BankNifty"],
         index=0,
-        help="Switch between Nifty and Sensex data views."
+        help="Switch between Nifty, Sensex, and BankNifty data views."
     )
     st.markdown("---")
 
@@ -487,6 +546,7 @@ with st.sidebar:
 master_symbols = [
     {"market": "India",      "name": "NIFTY 50",    "tv_symbol": "NSE:NIFTY",        "start": "09:15", "end": "15:30", "icon": "🇮🇳", "w": 0,          "trigger_alignment": False, "category": "india"},
     {"market": "India",      "name": "SENSEX",      "tv_symbol": "BSE:SENSEX",       "start": "09:15", "end": "15:30", "icon": "🇮🇳", "w": 0,          "trigger_alignment": False, "category": "india"},
+    {"market": "India",      "name": "BANK NIFTY",  "tv_symbol": "NSE:BANKNIFTY",    "start": "09:15", "end": "15:30", "icon": "🇮🇳", "w": 0,          "trigger_alignment": False, "category": "india"},
     {"market": "Gift City",  "name": "GIFT Nifty",  "tv_symbol": "NSEIX:NIFTY1!",    "start": "06:30", "end": "02:45", "icon": "🎁", "w": w_gift,     "trigger_alignment": True,  "category": "nifty_futures"},
     {"market": "NSE Intl",   "name": "BankNifty Fut","tv_symbol": "NSEIX:BANKNIFTY1!","start": "06:30", "end": "03:00", "icon": "🏦", "w": w_sgx,      "trigger_alignment": True,  "category": "nifty_futures"},
     {"market": "USA",        "name": "Nasdaq 100",  "tv_symbol": "NASDAQ:NDX",       "start": "20:00", "end": "02:30", "icon": "🇺🇸", "w": w_nasdaq,   "trigger_alignment": True,  "category": "us"},
@@ -811,10 +871,12 @@ def fetch_futures_data():
     response = requests.get(url, params=params, headers=headers)
     return json.loads(response.text)
 
-def parse_futures_flow(data, title="OI Flow Details", key_prefix=None):
+def parse_futures_flow(data, title="OI Flow Details", key_prefix=None, key_contains=None):
     smartlist = data['data']['smartlist']
     if key_prefix:
         smartlist = [item for item in smartlist if item["instrument_key"].startswith(key_prefix)]
+    if key_contains:
+        smartlist = [item for item in smartlist if key_contains in item["instrument_key"]]
     rows = []
     weighted_score = 0.0
     total_value_weight = 0.0
@@ -876,6 +938,7 @@ trigger_pcts_c2   = []
 
 nifty_price = nifty_prev_close = 0.0
 sensex_price = sensex_prev_close = 0.0
+banknifty_price = banknifty_prev_close = 0.0
 vix_value   = 0.0
 usdinr_pct  = 0.0
 china_pct   = 0.0
@@ -896,6 +959,8 @@ for s, res in results:
             nifty_price, nifty_prev_close = close, prev
         elif s["name"] == "SENSEX":
             sensex_price, sensex_prev_close = close, prev
+        elif s["name"] == "BANK NIFTY":
+            banknifty_price, banknifty_prev_close = close, prev
         elif s["name"] == "VIX":
             vix_value = close
         elif s["name"] == "India VIX":
@@ -931,10 +996,12 @@ for s, res in results:
 fetched_data = fetch_futures_data()
 nifty_flow_result = parse_futures_flow(fetched_data, title="Nifty OI Flow Details", key_prefix="NSE_FO")
 sensex_flow_result = parse_futures_flow(fetched_data, title="Sensex OI Flow Details", key_prefix="BSE_FO")
+banknifty_flow_result = parse_futures_flow(fetched_data, title="BankNifty OI Flow Details", key_prefix="NSE_FO", key_contains="BANKNIFTY")
 
 # Store macro scores for Code 3
 nifty_macro_score = nifty_flow_result["score"]
 sensex_macro_score = sensex_flow_result["score"]
+banknifty_macro_score = banknifty_flow_result["score"]
 
 momentum_score, momentum_label, momentum_pct = calculate_momentum_score(
     nifty_price, nifty_prev_close, momentum_lookback)
@@ -1099,10 +1166,10 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
     to actually influence spot price. Falls back to the top OI-diff strike if none
     of the candidates pass the Delta filter (or if Greeks data isn't available).
     """
-    if change_oi_response.get("status") != "success":
+    if not change_oi_response or change_oi_response.get("status") != "success":
         return None
-    data = change_oi_response.get("data", {})
-    items = data.get("call_put_oi_data_list", [])
+    data = change_oi_response.get("data") or {}
+    items = data.get("call_put_oi_data_list") or []
     if not items:
         return None
 
@@ -1176,10 +1243,10 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
     Returns exit signal details based on the opposite OI change high type,
     but only if the distance between entry trigger and exit trigger >= min_gap.
     """
-    if change_oi_response.get("status") != "success":
+    if not change_oi_response or change_oi_response.get("status") != "success":
         return None
-    data = change_oi_response.get("data", {})
-    items = data.get("call_put_oi_data_list", [])
+    data = change_oi_response.get("data") or {}
+    items = data.get("call_put_oi_data_list") or []
     if not items:
         return None
 
@@ -1269,6 +1336,19 @@ if sensex_entry_signal:
         sensex_entry_signal = None
 
 # ==============================
+# COMPUTE BANKNIFTY SIGNALS (Code 6)
+# ==============================
+banknifty_entry_signal = None
+if banknifty_price > 0 and upstoxBankNiftyOiChangeResponse.get("status") == "success":
+    banknifty_entry_signal = get_entry_signal_from_change_oi(upstoxBankNiftyOiChangeResponse, banknifty_price, buffer_points=27, greeks_by_strike=banknifty_greeks_by_strike)
+
+banknifty_exit_signal = None
+if banknifty_entry_signal:
+    banknifty_exit_signal = get_exit_signal_from_change_oi(upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_entry_signal, buffer_points=27, min_gap=100, greeks_by_strike=banknifty_greeks_by_strike)
+    if banknifty_exit_signal is None:
+        banknifty_entry_signal = None
+
+# ==============================
 # TIMESTAMP
 # ==============================
 entry_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
@@ -1313,8 +1393,10 @@ def render_greeks_panel(signal_data, label):
 # Dynamic title based on selected index
 if index_selection == "Nifty":
     st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
-else:
+elif index_selection == "Sensex":
     st.title("🔮 Sensex Analytics & Strategy Suite — Pro")
+else:
+    st.title("🔮 BankNifty Analytics & Strategy Suite — Pro")
 
 # ==============================
 # NIFTY-SPECIFIC VIEW (with reordered components)
@@ -1578,6 +1660,90 @@ elif index_selection == "Sensex":
         st.dataframe(pd.DataFrame(sensex_flow_result["rows"]))
     else:
         st.info("No Sensex futures met the turnover threshold right now.")
+
+# ==============================
+# BANKNIFTY-SPECIFIC VIEW
+# ==============================
+elif index_selection == "BankNifty":
+
+    # ---- Code 6 – BankNifty Entry & Exit ----
+    st.subheader("📊 Code 6 — BankNifty OI Change Entry Signal")
+    if banknifty_entry_signal:
+        signal = banknifty_entry_signal["signal"]
+        active = banknifty_entry_signal["active"]
+        emoji = "🟢" if signal == "BUY" else "🔴"
+        status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
+        text_color = "white" if active else "black"
+        border_color = "#2e7d32" if signal=="BUY" else "#c62828"
+        st.markdown(f"""
+        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                <div>
+                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
+                    <span style="margin-left: 15px; font-size: 1.2rem;">at {banknifty_entry_signal['trigger_price']:,.2f}</span>
+                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{banknifty_entry_signal['high_type']}</span>
+                </div>
+                <div style="font-weight: bold;">
+                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
+                </div>
+            </div>
+            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+                <span>📊 Current BankNifty: <b>{banknifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{banknifty_entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{banknifty_entry_signal['oi_diff']:,.0f}</b></span>
+                <span style="margin-left: 20px;">📌 {banknifty_entry_signal['reason']}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        render_greeks_panel(banknifty_entry_signal, "BankNifty Entry")
+    else:
+        st.info("ℹ️ No BankNifty Change OI entry signal (gap < 100 pts or no opposite OI).")
+
+    st.subheader("📊 Code 6 — BankNifty OI Change Exit Signal")
+    if banknifty_exit_signal:
+        signal = banknifty_exit_signal["signal"]
+        active = banknifty_exit_signal["active"]
+        emoji = "🟢" if signal == "BUY" else "🔴"
+        status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
+        text_color = "white" if active else "black"
+        border_color = "#0277bd" if signal=="BUY" else "#d84315"
+        st.markdown(f"""
+        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                <div>
+                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
+                    <span style="margin-left: 15px; font-size: 1.2rem;">at {banknifty_exit_signal['trigger_price']:,.2f}</span>
+                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{banknifty_exit_signal['high_type']}</span>
+                </div>
+                <div style="font-weight: bold;">
+                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
+                </div>
+            </div>
+            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+                <span>📊 Current BankNifty: <b>{banknifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{banknifty_exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{banknifty_exit_signal['oi_diff']:,.0f}</b></span>
+                <span style="margin-left: 20px;">📌 {banknifty_exit_signal['reason']}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        render_greeks_panel(banknifty_exit_signal, "BankNifty Exit")
+    else:
+        st.info("ℹ️ No BankNifty exit signal available (opposite OI build‑up not found or gap < 100 pts).")
+
+    # ---- BankNifty OI Data ----
+    reusable_display_oi_data(upstoxBankNiftyOiResponse, "BankNifty Open Interest Data")
+    reusable_display_oi_data(upstoxBankNiftyOiChangeResponse, "BankNifty Change in OI")
+
+    # ---- BankNifty OI Flow ----
+    if banknifty_flow_result["rows"]:
+        st.subheader(f"{banknifty_flow_result['title']} — Macro Score: {banknifty_flow_result['score']:.2f}")
+        st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
+        indicator = "Bullish" if banknifty_flow_result["score"] > 0 else ("Bearish" if banknifty_flow_result["score"] < 0 else "Sideways")
+        st.write(f"Market Bias: {indicator}")
+        st.dataframe(pd.DataFrame(banknifty_flow_result["rows"]))
+    else:
+        st.info("No BankNifty futures met the turnover threshold right now.")
 
 # ==============================
 # GLOBAL DASHBOARD (visible for both selections)
