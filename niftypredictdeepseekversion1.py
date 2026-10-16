@@ -430,6 +430,11 @@ banknifty_greeks_by_strike = parse_greeks_by_strike(banknifty_option_chain_respo
 
 def reusable_display_oi_data(upstoxResponse, title):
     data = upstoxResponse["data"]
+    # FIX: no OI data yet (market closed / before open) -> show a message instead of crashing
+    if not data or not data.get("call_put_oi_data_list"):
+        st.subheader(title)
+        st.info("ℹ️ No OI data available from Upstox right now (market is likely closed).")
+        return
     Total_Puts = 0
     Total_Calls = 0
 
@@ -1124,7 +1129,16 @@ else:                                                              card_class_c2
 # ==============================
 # FIX: guard against "data" being None (e.g. market closed / before open) to avoid TypeError
 change_oi_data = (upstoxOiChangeResponse.get("data") or {}).get("call_put_oi_data_list") if upstoxOiChangeResponse.get("status") == "success" else None
-oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price, change_oi_data, nifty_macro_score)
+if data and data.get("call_put_oi_data_list"):
+    oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price, change_oi_data, nifty_macro_score)
+else:
+    # FIX: no OI data yet (market closed / before open) -> neutral placeholder so the UI still renders
+    oi_signal = {
+        "direction": "NO DATA", "target": 0.0, "stop_loss": 0.0, "confidence": 0.0,
+        "max_pain": 0.0, "resistance": 0.0, "support": 0.0, "pcr": 0.0,
+        "bull_votes": 0, "bear_votes": 0, "net_call_change": 0, "net_put_change": 0,
+        "macro_flow_score": None, "max_call_change_strike": None, "max_put_change_strike": None,
+    }
 
 # Determine OI card style
 if oi_signal["direction"] == "BULLISH":
