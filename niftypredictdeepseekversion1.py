@@ -1122,7 +1122,8 @@ else:                                                              card_class_c2
 # ==============================
 # CODE 3 – OI prediction (Nifty)
 # ==============================
-change_oi_data = upstoxOiChangeResponse["data"]["call_put_oi_data_list"] if upstoxOiChangeResponse.get("status") == "success" else None
+# FIX: guard against "data" being None (e.g. market closed / before open) to avoid TypeError
+change_oi_data = (upstoxOiChangeResponse.get("data") or {}).get("call_put_oi_data_list") if upstoxOiChangeResponse.get("status") == "success" else None
 oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price, change_oi_data, nifty_macro_score)
 
 # Determine OI card style
