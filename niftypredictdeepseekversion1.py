@@ -207,6 +207,28 @@ days_until_tuesday = (1 - ist_now.weekday()) % 7  # Monday=0 ... Tuesday=1
 expiry_date = ist_now + dt_mod.timedelta(days=days_until_tuesday)
 expiry_str = expiry_date.strftime('%Y-%m-%d')
 
+# Holiday-safe expiry: ask Upstox for the real upcoming expiry (handles holiday shifts like
+# Dussehra 20-Oct-2026 -> Nifty expiry moves to Mon 19-Oct). Falls back to the computed date.
+@st.cache_data(ttl=1800)
+def get_nearest_expiry(instrument_key, fallback_str, today_key):
+    try:
+        r = requests.get(
+            'https://api.upstox.com/v2/option/contract',
+            params={'instrument_key': instrument_key},
+            headers={'Accept': 'application/json', 'Authorization': access_token},
+            timeout=10
+        )
+        d = json.loads(r.text)
+        expiries = sorted({c.get('expiry') for c in (d.get('data') or []) if c.get('expiry')})
+        upcoming = [e for e in expiries if e >= today_key]
+        if upcoming:
+            return upcoming[0]
+    except Exception:
+        pass
+    return fallback_str
+
+expiry_str = get_nearest_expiry('NSE_INDEX|Nifty 50', expiry_str, today_str)
+
 # Sensex weekly expiry is Thursday (BSE, effective 4 Sep 2025)
 days_until_thursday = (3 - ist_now.weekday()) % 7  # Monday=0 ... Thursday=3
 sensex_expiry_date = ist_now + dt_mod.timedelta(days=days_until_thursday)
@@ -429,12 +451,13 @@ banknifty_option_chain_response = fetch_option_chain('NSE_INDEX|Nifty Bank', ban
 banknifty_greeks_by_strike = parse_greeks_by_strike(banknifty_option_chain_response)
 
 def reusable_display_oi_data(upstoxResponse, title):
-    data = upstoxResponse["data"]
-    # FIX: no OI data yet (market closed / before open) -> show a message instead of crashing
-    if not data or not data.get("call_put_oi_data_list"):
+    # Guard: API can return status "success" with data = None (market closed / data not published yet)
+    if not upstoxResponse or not upstoxResponse.get("data"):
         st.subheader(title)
-        st.info("ℹ️ No OI data available from Upstox right now (market is likely closed).")
+        st.info("ℹ️ No data available right now (market closed or data not yet published).")
         return
+
+    data = upstoxResponse["data"]
     Total_Puts = 0
     Total_Calls = 0
 
@@ -540,6 +563,20 @@ with st.sidebar:
     momentum_lookback = st.slider("Momentum Lookback (min)", 5, 30, 15, 5, key="mom_lookback")
     momentum_threshold = st.slider("Momentum Threshold %", 0.1, 0.5, 0.25, 0.05, key="mom_thresh")
 
+    st.markdown("---")
+    st.markdown("#### 🛡️ Entry Confirmation Gate")
+    gate_hold_min     = st.slider("Signal must hold (min)", 0, 30, 5, 1, key="gate_hold")
+    gate_price_min    = st.slider("Price beyond trigger for (min)", 0, 15, 3, 1, key="gate_price")
+    gate_min_score    = st.slider("Min futures score to agree", 0.0, 0.9, 0.2, 0.05, key="gate_score")
+    gate_min_dom      = st.slider("Strike dominance (x vs next)", 1.0, 3.0, 1.3, 0.1, key="gate_dom")
+    gate_max_dist_pct = st.slider("Max strike distance from spot %", 0.5, 5.0, 2.0, 0.5, key="gate_dist")
+    gate_sl_buffer    = st.slider("Stop-loss buffer beyond strike (pts)", 5, 100, 20, 5, key="gate_sl")
+    gate_time_filter  = st.checkbox("Block opening 15 min & last 30 min", value=True, key="gate_time")
+    gate_use_futures  = st.checkbox("Require futures score agreement", value=True, key="gate_use_fut")
+    if st.button("🔄 Reset locked signals", key="gate_reset"):
+        for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("gate_state_")]:
+            del st.session_state[_k]
+
     if is_after_china:
         st.sidebar.success("China Logic: ACTIVE")
     else:
@@ -580,6 +617,9 @@ SESSION.mount("http://", adapter)
 SESSION.mount("https://", adapter)
 
 def fetch_master_data(symbol_dict):
+    # Nifty / Sensex / BankNifty come from Upstox (prefetched below); others stay on TradingView
+    if symbol_dict["name"] in UPSTOX_INDEX_KEYS and symbol_dict["name"] in upstox_index_quotes:
+        return symbol_dict, upstox_index_quotes[symbol_dict["name"]]
     payload = {
         "symbols": {"tickers": [symbol_dict["tv_symbol"]], "query": {"types": []}},
         "columns": ["close", "change", "change_abs"]
@@ -931,6 +971,49 @@ def parse_futures_flow(data, title="OI Flow Details", key_prefix=None, key_conta
 # ==============================
 # FETCH ALL DATA (master symbols + OI Flow)
 # ==============================
+UPSTOX_INDEX_KEYS = {
+    "NIFTY 50":   "NSE_INDEX|Nifty 50",
+    "SENSEX":     "BSE_INDEX|SENSEX",
+    "BANK NIFTY": "NSE_INDEX|Nifty Bank",
+}
+
+def fetch_upstox_index_quotes():
+    """Live index prices from Upstox. Returns {name: (prev_close, close, change_abs, pct)}."""
+    out = {}
+    try:
+        r = requests.get(
+            'https://api.upstox.com/v2/market-quote/quotes',
+            params={'instrument_key': ",".join(UPSTOX_INDEX_KEYS.values())},
+            headers={'Accept': 'application/json', 'Authorization': access_token},
+            timeout=5
+        )
+        d = json.loads(r.text)
+        if d.get("status") != "success":
+            return out
+        by_token = {}
+        for k, v in (d.get("data") or {}).items():
+            by_token[k.replace(":", "|")] = v
+            if v.get("instrument_token"):
+                by_token[v["instrument_token"]] = v
+        for name, key in UPSTOX_INDEX_KEYS.items():
+            q = by_token.get(key)
+            if not q:
+                continue
+            close = q.get("last_price")
+            if not close:
+                continue
+            net = q.get("net_change")
+            if net is None:
+                net = close - ((q.get("ohlc") or {}).get("close") or close)
+            prev = close - net
+            pct = (net / prev * 100) if prev else 0
+            out[name] = (round(prev, 2), round(close, 2), round(net, 2), round(pct, 2))
+    except Exception as e:
+        print(f"Error fetching Upstox index quotes: {e}")
+    return out
+
+upstox_index_quotes = fetch_upstox_index_quotes()
+
 with ThreadPoolExecutor(max_workers=len(master_symbols)) as executor:
     results = list(executor.map(fetch_master_data, master_symbols))
 
@@ -1127,17 +1210,28 @@ else:                                                              card_class_c2
 # ==============================
 # CODE 3 – OI prediction (Nifty)
 # ==============================
-# FIX: guard against "data" being None (e.g. market closed / before open) to avoid TypeError
 change_oi_data = (upstoxOiChangeResponse.get("data") or {}).get("call_put_oi_data_list") if upstoxOiChangeResponse.get("status") == "success" else None
-if data and data.get("call_put_oi_data_list"):
-    oi_signal = compute_oi_signal(data["call_put_oi_data_list"], nifty_price, change_oi_data, nifty_macro_score)
+oi_list_main = data.get("call_put_oi_data_list") if isinstance(data, dict) else None
+if oi_list_main:
+    oi_signal = compute_oi_signal(oi_list_main, nifty_price, change_oi_data, nifty_macro_score)
 else:
-    # FIX: no OI data yet (market closed / before open) -> neutral placeholder so the UI still renders
+    # Main OI data not available (market closed / not published yet) -> neutral fallback
     oi_signal = {
-        "direction": "NO DATA", "target": 0.0, "stop_loss": 0.0, "confidence": 0.0,
-        "max_pain": 0.0, "resistance": 0.0, "support": 0.0, "pcr": 0.0,
-        "bull_votes": 0, "bear_votes": 0, "net_call_change": 0, "net_put_change": 0,
-        "macro_flow_score": None, "max_call_change_strike": None, "max_put_change_strike": None,
+        "direction": "NEUTRAL",
+        "target": 0.0,
+        "stop_loss": 0.0,
+        "confidence": 0.0,
+        "max_pain": 0.0,
+        "resistance": 0.0,
+        "support": 0.0,
+        "pcr": 0.0,
+        "bull_votes": 0,
+        "bear_votes": 0,
+        "net_call_change": 0,
+        "net_put_change": 0,
+        "macro_flow_score": nifty_macro_score,
+        "max_call_change_strike": None,
+        "max_put_change_strike": None,
     }
 
 # Determine OI card style
@@ -1237,6 +1331,13 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
     elif signal == "SELL" and spot_price <= trigger_price:
         active = True
 
+    # --- Strike quality + stop-loss (used by the entry confirmation gate) ---
+    _others = [r[0] for r in ranked if r[1] is not best_item]
+    _second = _others[0] if _others else 0
+    dominance = (best_diff / _second) if _second > 0 else 99.0
+    stop_loss = (strike - gate_sl_buffer) if signal == "BUY" else (strike + gate_sl_buffer)
+    reason = f"{reason} | SL {stop_loss:,.0f}"
+
     return {
         "strike": strike,
         "high_type": high_type,
@@ -1247,6 +1348,8 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
         "call_oi": best_call_oi,
         "put_oi": best_put_oi,
         "oi_diff": best_diff,
+        "dominance": dominance,
+        "stop_loss": stop_loss,
         "greeks": greeks_by_strike.get(strike) if greeks_by_strike else None,
         "greeks_confidence": best_conf,
         "delta_ok": best_delta_ok,
@@ -1300,11 +1403,11 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
     if abs(entry_trigger - trigger_price) < min_gap:
         return None
 
-    active = False
-    if exit_signal_type == "BUY" and spot_price >= trigger_price:
-        active = True
-    elif exit_signal_type == "SELL" and spot_price <= trigger_price:
-        active = True
+    # Target reached: BUY entry -> target is above (hit when spot rises to it); SELL entry -> target below.
+    if entry_signal["signal"] == "BUY":
+        active = spot_price >= trigger_price
+    else:
+        active = spot_price <= trigger_price
 
     if opposite_high_type == "HIGH PUT":
         reason = f"Exit BUY signal: Support at {strike} (Put OI > Call OI). Trigger at {trigger_price}"
@@ -1327,46 +1430,198 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
 # ==============================
 # COMPUTE NIFTY SIGNALS (Code 4)
 # ==============================
-nifty_entry_signal = None
-if nifty_price > 0 and upstoxOiChangeResponse.get("status") == "success":
-    nifty_entry_signal = get_entry_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, buffer_points=27, greeks_by_strike=nifty_greeks_by_strike)
+# ===== GATE START =====
+# ==============================
+# ENTRY CONFIRMATION GATE
+# Hold-time + price confirmation + futures agreement + strike quality + time window,
+# then LOCK the signal so OI re-ranking can't flip it until the stop-loss is hit.
+# ==============================
+def _fmt_t(dt_obj):
+    return dt_obj.strftime("%H:%M:%S") if dt_obj else "—"
 
-nifty_exit_signal = None
-if nifty_entry_signal:
-    nifty_exit_signal = get_exit_signal_from_change_oi(upstoxOiChangeResponse, nifty_price, nifty_entry_signal, buffer_points=27, min_gap=100, greeks_by_strike=nifty_greeks_by_strike)
-    if nifty_exit_signal is None:
-        nifty_entry_signal = None
+def _in_trade_window(now_dt):
+    if now_dt.weekday() >= 5:
+        return False, "Weekend — market closed"
+    t = now_dt.time()
+    if t < time(9, 15) or t > time(15, 30):
+        return False, "Market closed"
+    if not gate_time_filter:
+        return True, "Market open (time filter off)"
+    if t < time(9, 30):
+        return False, "Opening 15 min — wait for liquidity to settle"
+    if t > time(15, 0):
+        return False, "Last 30 min — avoid late entries"
+    return True, "Inside preferred trading window (09:30–15:00)"
+
+def _beyond_trigger(sig, trig, spot):
+    return (sig == "BUY" and spot >= trig) or (sig == "SELL" and spot <= trig)
+
+def entry_status_text(sig):
+    return sig.get("status_label") or ("ACTIVE" if sig.get("active") else "PENDING")
+
+def apply_signal_gate(index_name, entry, spot_price, macro_score):
+    key = f"gate_state_{index_name}"
+    now_dt = datetime.now(ist)
+    today_key = now_dt.strftime("%Y-%m-%d")
+    state = st.session_state.get(key)
+    if not state or state.get("date") != today_key:
+        state = {"date": today_key, "cand_dir": None, "cand_since": None,
+                 "cross_since": None, "locked": None, "event": ""}
+    status = {"verdict": "NONE", "checks": [], "time_label": "—", "warning": "", "event": state.get("event", "")}
+
+    # Futures-score history (last 15 min) to show whether flow is strengthening or fading
+    hist_key = f"gate_hist_{index_name}"
+    hist = st.session_state.get(hist_key, [])
+    hist.append((now_dt, macro_score))
+    hist = [h for h in hist if (now_dt - h[0]).total_seconds() <= 900]
+    st.session_state[hist_key] = hist
+    ref = next((sc for t, sc in hist if (now_dt - t).total_seconds() <= 300), None)
+    trend_txt = f", {macro_score - ref:+.2f} vs ~5 min ago" if (ref is not None and len(hist) > 1) else ""
+
+    # ---- A. Already locked: hold it, only watch the stop-loss ----
+    locked = state.get("locked")
+    if locked:
+        sig = locked["signal"]
+        stopped = (sig == "BUY" and spot_price <= locked["stop_loss"]) or \
+                  (sig == "SELL" and spot_price >= locked["stop_loss"])
+        if stopped:
+            state["event"] = (f"🛑 {sig} signal (locked {_fmt_t(locked['confirmed_at'])}) hit stop-loss "
+                              f"{locked['stop_loss']:,.2f} at {_fmt_t(now_dt)} — signal released")
+            state.update({"locked": None, "cand_dir": None, "cand_since": None, "cross_since": None})
+            locked = None
+        else:
+            out = dict(locked)
+            beyond = _beyond_trigger(sig, out["trigger_price"], spot_price)
+            out["active"] = beyond
+            out["status_label"] = "🔒 CONFIRMED & ACTIVE" if beyond else "🔒 LOCKED — price back inside trigger"
+            status.update({"verdict": "LOCKED", "time_label": f"Locked {_fmt_t(out['confirmed_at'])}",
+                           "event": state.get("event", "")})
+            status["checks"] = [(True, f"Locked at {_fmt_t(out['confirmed_at'])} — ignores OI re-ranking until "
+                                       f"stop-loss {out['stop_loss']:,.2f} is hit")]
+            if entry and entry["signal"] != sig:
+                status["warning"] = (f"Live OI now leans {entry['signal']} (key strike {entry['strike']}), "
+                                     f"opposite to your locked {sig}. Review your risk.")
+            st.session_state[key] = state
+            return out, status
+
+    # ---- B. Not locked: evaluate the candidate ----
+    if not entry:
+        state.update({"cand_dir": None, "cand_since": None, "cross_since": None})
+        status["event"] = state.get("event", "")
+        st.session_state[key] = state
+        return None, status
+
+    sig = entry["signal"]
+    if state["cand_dir"] != sig:
+        state.update({"cand_dir": sig, "cand_since": now_dt, "cross_since": None})
+    if _beyond_trigger(sig, entry["trigger_price"], spot_price):
+        if state["cross_since"] is None:
+            state["cross_since"] = now_dt
+    else:
+        state["cross_since"] = None
+
+    held_s = (now_dt - state["cand_since"]).total_seconds()
+    cross_s = (now_dt - state["cross_since"]).total_seconds() if state["cross_since"] else 0.0
+
+    checks = []
+    checks.append((held_s >= gate_hold_min * 60,
+                   f"Signal held {held_s/60:.1f} / {gate_hold_min} min (same direction, no flip)"))
+    checks.append((state["cross_since"] is not None and cross_s >= gate_price_min * 60,
+                   f"Price beyond trigger {entry['trigger_price']:,.0f} for {cross_s/60:.1f} / {gate_price_min} min"))
+    if gate_use_futures:
+        agree = (macro_score >= gate_min_score) if sig == "BUY" else (macro_score <= -gate_min_score)
+        need = f"≥ +{gate_min_score:.2f}" if sig == "BUY" else f"≤ -{gate_min_score:.2f}"
+        checks.append((agree, f"Futures flow score {macro_score:+.2f}{trend_txt} (needs {need})"))
+    dom = entry.get("dominance", 99.0)
+    checks.append((dom >= gate_min_dom, f"Key strike dominance {min(dom, 99):.1f}x vs next (min {gate_min_dom:.1f}x)"))
+    dist_pct = abs(entry["strike"] - spot_price) / spot_price * 100 if spot_price else 0
+    checks.append((dist_pct <= gate_max_dist_pct, f"Key strike {dist_pct:.2f}% from spot (max {gate_max_dist_pct:.1f}%)"))
+    checks.append((entry.get("delta_ok", True), "Strike passes Delta relevance filter"))
+    win_ok, win_txt = _in_trade_window(now_dt)
+    checks.append((win_ok, win_txt))
+
+    passed = sum(1 for ok, _ in checks if ok)
+    status["checks"] = checks
+
+    if passed == len(checks):
+        locked_entry = dict(entry)
+        locked_entry["confirmed_at"] = now_dt
+        state["locked"] = locked_entry
+        state["event"] = f"✅ {sig} confirmed at {_fmt_t(now_dt)} (spot {spot_price:,.2f}) — signal locked"
+        out = dict(locked_entry)
+        out["active"] = True
+        out["status_label"] = "🔒 CONFIRMED & ACTIVE"
+        status.update({"verdict": "CONFIRMED", "time_label": f"Locked {_fmt_t(now_dt)}", "event": state["event"]})
+    else:
+        out = dict(entry)
+        out["active"] = False
+        out["status_label"] = f"⏳ WAITING — {passed}/{len(checks)} checks passed"
+        out["reason"] = f"{out['reason']} | NOT CONFIRMED"
+        status.update({"verdict": "WAITING", "time_label": f"First seen {_fmt_t(state['cand_since'])}",
+                       "event": state.get("event", "")})
+
+    st.session_state[key] = state
+    return out, status
+
+def render_gate_panel(gate, label):
+    verdict = gate.get("verdict", "NONE")
+    if verdict == "NONE":
+        st.caption(f"🛡️ {label} entry gate: no raw OI signal right now.")
+        if gate.get("event"):
+            st.caption(gate["event"])
+        return
+    color = {"CONFIRMED": "#2e7d32", "LOCKED": "#2e7d32", "WAITING": "#f9a825"}.get(verdict, "#6e7781")
+    title = {"CONFIRMED": "✅ CONFIRMED — signal locked", "LOCKED": "🔒 LOCKED SIGNAL",
+             "WAITING": "⏳ WAITING FOR CONFIRMATION"}.get(verdict, verdict)
+    rows = "".join(f"<div>{'✅' if ok else '❌'} {txt}</div>" for ok, txt in gate["checks"])
+    extra = ""
+    if gate.get("warning"):
+        extra += f'<div style="margin-top:6px; color:#c62828;"><b>⚠️ {gate["warning"]}</b></div>'
+    if gate.get("event"):
+        extra += f'<div style="margin-top:6px; font-size:0.85rem;">{gate["event"]}</div>'
+    st.markdown(f"""
+    <div class="greeks-panel" style="border-left-color: {color};">
+        <b>🛡️ {label} Entry Gate — {title}</b>
+        <div style="margin-top:6px; font-size:0.9rem;">{rows}</div>
+        {extra}
+    </div>
+    """, unsafe_allow_html=True)
+
+def process_index_signals(index_name, change_oi_response, spot_price, greeks, macro_score):
+    entry = None
+    exit_sig = None
+    if spot_price > 0 and change_oi_response.get("status") == "success":
+        entry = get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_points=27, greeks_by_strike=greeks)
+    if entry:
+        exit_sig = get_exit_signal_from_change_oi(change_oi_response, spot_price, entry, buffer_points=27, min_gap=100, greeks_by_strike=greeks)
+        if exit_sig is None:
+            entry = None
+    entry, gate = apply_signal_gate(index_name, entry, spot_price, macro_score) if spot_price > 0 else (None, {"verdict": "NONE", "checks": [], "time_label": "—", "warning": "", "event": ""})
+    # A locked entry may differ from the live one -> recompute its exit target against the locked entry
+    if entry and gate.get("verdict") == "LOCKED" and change_oi_response.get("status") == "success":
+        exit_sig = get_exit_signal_from_change_oi(change_oi_response, spot_price, entry, buffer_points=27, min_gap=100, greeks_by_strike=greeks)
+    if not entry:
+        exit_sig = None
+    return entry, exit_sig, gate
+# ===== GATE END =====
+
+nifty_entry_signal, nifty_exit_signal, nifty_gate = process_index_signals("Nifty", upstoxOiChangeResponse, nifty_price, nifty_greeks_by_strike, nifty_macro_score)
 
 # ==============================
 # COMPUTE SENSEX SIGNALS (Code 5)
 # ==============================
-sensex_entry_signal = None
-if sensex_price > 0 and upstoxSensexOiChangeResponse.get("status") == "success":
-    sensex_entry_signal = get_entry_signal_from_change_oi(upstoxSensexOiChangeResponse, sensex_price, buffer_points=27, greeks_by_strike=sensex_greeks_by_strike)
-
-sensex_exit_signal = None
-if sensex_entry_signal:
-    sensex_exit_signal = get_exit_signal_from_change_oi(upstoxSensexOiChangeResponse, sensex_price, sensex_entry_signal, buffer_points=27, min_gap=100, greeks_by_strike=sensex_greeks_by_strike)
-    if sensex_exit_signal is None:
-        sensex_entry_signal = None
+sensex_entry_signal, sensex_exit_signal, sensex_gate = process_index_signals("Sensex", upstoxSensexOiChangeResponse, sensex_price, sensex_greeks_by_strike, sensex_macro_score)
 
 # ==============================
 # COMPUTE BANKNIFTY SIGNALS (Code 6)
 # ==============================
-banknifty_entry_signal = None
-if banknifty_price > 0 and upstoxBankNiftyOiChangeResponse.get("status") == "success":
-    banknifty_entry_signal = get_entry_signal_from_change_oi(upstoxBankNiftyOiChangeResponse, banknifty_price, buffer_points=27, greeks_by_strike=banknifty_greeks_by_strike)
-
-banknifty_exit_signal = None
-if banknifty_entry_signal:
-    banknifty_exit_signal = get_exit_signal_from_change_oi(upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_entry_signal, buffer_points=27, min_gap=100, greeks_by_strike=banknifty_greeks_by_strike)
-    if banknifty_exit_signal is None:
-        banknifty_entry_signal = None
+banknifty_entry_signal, banknifty_exit_signal, banknifty_gate = process_index_signals("BankNifty", upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_greeks_by_strike, banknifty_macro_score)
 
 # ==============================
 # TIMESTAMP
 # ==============================
-entry_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+updated_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+entry_datetime = updated_datetime
 
 def render_greeks_panel(signal_data, label):
     """Small panel showing Delta/Gamma/Theta/Vega/IV for a Code 4/5 signal's key strike."""
@@ -1417,6 +1672,7 @@ else:
 # NIFTY-SPECIFIC VIEW (with reordered components)
 # ==============================
 if index_selection == "Nifty":
+    entry_datetime = nifty_gate["time_label"]
 
     # ---- Divergence and VIX Alerts (placed near top) ----
     if divergence_detected:
@@ -1426,11 +1682,12 @@ if index_selection == "Nifty":
 
     # ---- Code 1: Nifty OI Change Entry/Exit (was Code 4) ----
     st.subheader("📊 Code 1 — Nifty OI Change Entry Signal")
+    render_gate_panel(nifty_gate, "Nifty")
     if nifty_entry_signal:
         signal = nifty_entry_signal["signal"]
         active = nifty_entry_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        status_text = entry_status_text(nifty_entry_signal)
         # Background color: green for active BUY, red for active SELL, amber for pending
         if active and signal == "BUY":
             bg_color = "#2e7d32"
@@ -1452,7 +1709,7 @@ if index_selection == "Nifty":
                 </div>
                 <div style="font-weight: bold;">
                     <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">⏱ {entry_datetime}</span>
                 </div>
             </div>
             <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
@@ -1470,7 +1727,7 @@ if index_selection == "Nifty":
         signal = nifty_exit_signal["signal"]
         active = nifty_exit_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        status_text = "🎯 TARGET REACHED" if active else "PENDING — target not reached yet"
         bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
         text_color = "white" if active else "black"
         border_color = "#0277bd" if signal=="BUY" else "#d84315"
@@ -1484,7 +1741,7 @@ if index_selection == "Nifty":
                 </div>
                 <div style="font-weight: bold;">
                     <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">Updated: {updated_datetime}</span>
                 </div>
             </div>
             <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
@@ -1596,14 +1853,16 @@ if index_selection == "Nifty":
 # SENSEX-SPECIFIC VIEW
 # ==============================
 elif index_selection == "Sensex":
+    entry_datetime = sensex_gate["time_label"]
 
     # ---- Code 5 – Sensex Entry & Exit ----
     st.subheader("📊 Code 5 — Sensex OI Change Entry Signal")
+    render_gate_panel(sensex_gate, "Sensex")
     if sensex_entry_signal:
         signal = sensex_entry_signal["signal"]
         active = sensex_entry_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        status_text = entry_status_text(sensex_entry_signal)
         bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
         text_color = "white" if active else "black"
         border_color = "#2e7d32" if signal=="BUY" else "#c62828"
@@ -1617,7 +1876,7 @@ elif index_selection == "Sensex":
                 </div>
                 <div style="font-weight: bold;">
                     <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">⏱ {entry_datetime}</span>
                 </div>
             </div>
             <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
@@ -1635,7 +1894,7 @@ elif index_selection == "Sensex":
         signal = sensex_exit_signal["signal"]
         active = sensex_exit_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        status_text = "🎯 TARGET REACHED" if active else "PENDING — target not reached yet"
         bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
         text_color = "white" if active else "black"
         border_color = "#0277bd" if signal=="BUY" else "#d84315"
@@ -1649,7 +1908,7 @@ elif index_selection == "Sensex":
                 </div>
                 <div style="font-weight: bold;">
                     <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">Updated: {updated_datetime}</span>
                 </div>
             </div>
             <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
@@ -1680,14 +1939,16 @@ elif index_selection == "Sensex":
 # BANKNIFTY-SPECIFIC VIEW
 # ==============================
 elif index_selection == "BankNifty":
+    entry_datetime = banknifty_gate["time_label"]
 
     # ---- Code 6 – BankNifty Entry & Exit ----
     st.subheader("📊 Code 6 — BankNifty OI Change Entry Signal")
+    render_gate_panel(banknifty_gate, "BankNifty")
     if banknifty_entry_signal:
         signal = banknifty_entry_signal["signal"]
         active = banknifty_entry_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        status_text = entry_status_text(banknifty_entry_signal)
         bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
         text_color = "white" if active else "black"
         border_color = "#2e7d32" if signal=="BUY" else "#c62828"
@@ -1701,7 +1962,7 @@ elif index_selection == "BankNifty":
                 </div>
                 <div style="font-weight: bold;">
                     <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Entry Time: {entry_datetime}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">⏱ {entry_datetime}</span>
                 </div>
             </div>
             <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
@@ -1719,7 +1980,7 @@ elif index_selection == "BankNifty":
         signal = banknifty_exit_signal["signal"]
         active = banknifty_exit_signal["active"]
         emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "EXIT ACTIVE" if active else "PENDING (waiting for price to cross trigger)"
+        status_text = "🎯 TARGET REACHED" if active else "PENDING — target not reached yet"
         bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
         text_color = "white" if active else "black"
         border_color = "#0277bd" if signal=="BUY" else "#d84315"
@@ -1733,7 +1994,7 @@ elif index_selection == "BankNifty":
                 </div>
                 <div style="font-weight: bold;">
                     <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Exit Time: {entry_datetime}</span>
+                    <span style="margin-left: 20px; font-size: 0.9rem;">Updated: {updated_datetime}</span>
                 </div>
             </div>
             <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
