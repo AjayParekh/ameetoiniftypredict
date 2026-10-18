@@ -573,6 +573,14 @@ with st.sidebar:
     gate_sl_buffer    = st.slider("Stop-loss buffer beyond strike (pts)", 5, 100, 20, 5, key="gate_sl")
     gate_time_filter  = st.checkbox("Block opening 15 min & last 30 min", value=True, key="gate_time")
     gate_use_futures  = st.checkbox("Require futures score agreement", value=True, key="gate_use_fut")
+
+    st.markdown("---")
+    st.markdown("#### 🧭 OI Flip Meter")
+    meter_window_strikes = st.slider("Strikes each side of spot", 2, 12, 6, 1, key="meter_win")
+    meter_flip_threshold = st.slider("Flip strength threshold (±)", 10, 60, 20, 5, key="meter_thr")
+    meter_flip_lookback  = st.slider("Flip look-back / validity (min)", 10, 90, 30, 5, key="meter_look")
+    gate_flip_override   = st.checkbox("Confirmed OI flip overrides hold-time, opening window & opposite locked signal",
+                                       value=True, key="gate_flip_ovr")
     if st.button("🔄 Reset locked signals", key="gate_reset"):
         for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("gate_state_")]:
             del st.session_state[_k]
@@ -1439,7 +1447,7 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
 def _fmt_t(dt_obj):
     return dt_obj.strftime("%H:%M:%S") if dt_obj else "—"
 
-def _in_trade_window(now_dt):
+def _in_trade_window(now_dt, allow_opening=False):
     if now_dt.weekday() >= 5:
         return False, "Weekend — market closed"
     t = now_dt.time()
@@ -1448,6 +1456,8 @@ def _in_trade_window(now_dt):
     if not gate_time_filter:
         return True, "Market open (time filter off)"
     if t < time(9, 30):
+        if allow_opening:
+            return True, "Opening 15 min allowed — confirmed OI flip"
         return False, "Opening 15 min — wait for liquidity to settle"
     if t > time(15, 0):
         return False, "Last 30 min — avoid late entries"
@@ -1459,7 +1469,7 @@ def _beyond_trigger(sig, trig, spot):
 def entry_status_text(sig):
     return sig.get("status_label") or ("ACTIVE" if sig.get("active") else "PENDING")
 
-def apply_signal_gate(index_name, entry, spot_price, macro_score):
+def apply_signal_gate(index_name, entry, spot_price, macro_score, flip=None):
     key = f"gate_state_{index_name}"
     now_dt = datetime.now(ist)
     today_key = now_dt.strftime("%Y-%m-%d")
@@ -1478,15 +1488,23 @@ def apply_signal_gate(index_name, entry, spot_price, macro_score):
     ref = next((sc for t, sc in hist if (now_dt - t).total_seconds() <= 300), None)
     trend_txt = f", {macro_score - ref:+.2f} vs ~5 min ago" if (ref is not None and len(hist) > 1) else ""
 
-    # ---- A. Already locked: hold it, only watch the stop-loss ----
+    flip_dir = (flip or {}).get("flip")
+    flip_sig = {"BULLISH": "BUY", "BEARISH": "SELL"}.get(flip_dir)
+
+    # ---- A. Already locked: hold it, only watch the stop-loss (or a confirmed opposite OI flip) ----
     locked = state.get("locked")
     if locked:
         sig = locked["signal"]
         stopped = (sig == "BUY" and spot_price <= locked["stop_loss"]) or \
                   (sig == "SELL" and spot_price >= locked["stop_loss"])
-        if stopped:
-            state["event"] = (f"🛑 {sig} signal (locked {_fmt_t(locked['confirmed_at'])}) hit stop-loss "
-                              f"{locked['stop_loss']:,.2f} at {_fmt_t(now_dt)} — signal released")
+        flip_release = bool(gate_flip_override and flip_sig and flip_sig != sig)
+        if stopped or flip_release:
+            if stopped:
+                state["event"] = (f"🛑 {sig} signal (locked {_fmt_t(locked['confirmed_at'])}) hit stop-loss "
+                                  f"{locked['stop_loss']:,.2f} at {_fmt_t(now_dt)} — signal released")
+            else:
+                state["event"] = (f"🔄 Confirmed {flip_dir} OI flip at {_fmt_t(now_dt)} — locked {sig} signal "
+                                  f"(since {_fmt_t(locked['confirmed_at'])}) released")
             state.update({"locked": None, "cand_dir": None, "cand_since": None, "cross_since": None})
             locked = None
         else:
@@ -1524,8 +1542,11 @@ def apply_signal_gate(index_name, entry, spot_price, macro_score):
     cross_s = (now_dt - state["cross_since"]).total_seconds() if state["cross_since"] else 0.0
 
     checks = []
-    checks.append((held_s >= gate_hold_min * 60,
-                   f"Signal held {held_s/60:.1f} / {gate_hold_min} min (same direction, no flip)"))
+    flip_ok = bool(gate_flip_override and flip_sig and flip_sig == sig)
+    held_ok = held_s >= gate_hold_min * 60
+    checks.append((held_ok or flip_ok,
+                   f"Signal held {held_s/60:.1f} / {gate_hold_min} min (same direction, no flip)"
+                   + (" — bypassed by confirmed OI flip" if (flip_ok and not held_ok) else "")))
     checks.append((state["cross_since"] is not None and cross_s >= gate_price_min * 60,
                    f"Price beyond trigger {entry['trigger_price']:,.0f} for {cross_s/60:.1f} / {gate_price_min} min"))
     if gate_use_futures:
@@ -1537,7 +1558,10 @@ def apply_signal_gate(index_name, entry, spot_price, macro_score):
     dist_pct = abs(entry["strike"] - spot_price) / spot_price * 100 if spot_price else 0
     checks.append((dist_pct <= gate_max_dist_pct, f"Key strike {dist_pct:.2f}% from spot (max {gate_max_dist_pct:.1f}%)"))
     checks.append((entry.get("delta_ok", True), "Strike passes Delta relevance filter"))
-    win_ok, win_txt = _in_trade_window(now_dt)
+    if flip_sig:
+        checks.append((flip_sig == sig, f"OI flip meter: {flip_dir} flip active "
+                                        f"({'agrees with' if flip_sig == sig else 'CONFLICTS with'} {sig} signal)"))
+    win_ok, win_txt = _in_trade_window(now_dt, allow_opening=flip_ok)
     checks.append((win_ok, win_txt))
 
     passed = sum(1 for ok, _ in checks if ok)
@@ -1579,15 +1603,169 @@ def render_gate_panel(gate, label):
         extra += f'<div style="margin-top:6px; color:#c62828;"><b>⚠️ {gate["warning"]}</b></div>'
     if gate.get("event"):
         extra += f'<div style="margin-top:6px; font-size:0.85rem;">{gate["event"]}</div>'
-    st.markdown(f"""
-    <div class="greeks-panel" style="border-left-color: {color};">
-        <b>🛡️ {label} Entry Gate — {title}</b>
-        <div style="margin-top:6px; font-size:0.9rem;">{rows}</div>
-        {extra}
-    </div>
-    """, unsafe_allow_html=True)
+    html = (f'<div class="greeks-panel" style="border-left-color: {color};">'
+            f'<b>🛡️ {label} Entry Gate — {title}</b>'
+            f'<div style="margin-top:6px; font-size:0.9rem;">{rows}</div>{extra}</div>')
+    st.markdown(html, unsafe_allow_html=True)
 
-def process_index_signals(index_name, change_oi_response, spot_price, greeks, macro_score):
+# ==============================
+# OI FLIP METER
+# Gamma-weighted (Put change-in-OI minus Call change-in-OI) for strikes around LIVE spot.
+# Positive = put writing / call unwinding (support building, bullish)
+# Negative = call writing / put unwinding (resistance building, bearish)
+# A FLIP = score was beyond one threshold, then sustainably moves beyond the other within the look-back.
+# ==============================
+def _fv(v, spec):
+    try:
+        return format(v, spec)
+    except Exception:
+        return "—"
+
+def compute_oi_flip_meter(index_name, change_oi_response, spot_price, greeks_by_strike):
+    now_dt = datetime.now(ist)
+    res = {"available": False, "score": 0.0, "state": "NO DATA", "flip": None, "flip_since": None,
+           "flip_from": None, "msg": "", "atm": None, "history": [], "n_strikes": 0}
+    if spot_price <= 0 or not change_oi_response or change_oi_response.get("status") != "success":
+        res["msg"] = "change-in-OI data not available (market closed or not yet published)."
+        return res
+    items = ((change_oi_response.get("data") or {}).get("call_put_oi_data_list")) or []
+    if not items:
+        res["msg"] = "change-in-OI data not available (market closed or not yet published)."
+        return res
+
+    rows = sorted(items, key=lambda x: x["strike_price"])
+    strikes = [r["strike_price"] for r in rows]
+    atm_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot_price))
+    lo = max(0, atm_idx - meter_window_strikes)
+    hi = min(len(rows), atm_idx + meter_window_strikes + 1)
+    window = rows[lo:hi]
+    greeks_by_strike = greeks_by_strike or {}
+
+    use_gamma = any(((greeks_by_strike.get(r["strike_price"]) or {}).get("call_gamma") or
+                     (greeks_by_strike.get(r["strike_price"]) or {}).get("put_gamma")) for r in window)
+    P = C = 0.0
+    for i, r in enumerate(window):
+        g = greeks_by_strike.get(r["strike_price"]) or {}
+        dist = abs((lo + i) - atm_idx)
+        if use_gamma:
+            wc = g.get("call_gamma") or 0
+            wp = g.get("put_gamma") or 0
+        else:
+            wc = wp = 1.0 / (1 + dist)
+        ccoi = r.get("call_change_oi", r.get("call_oi", 0)) or 0
+        pcoi = r.get("put_change_oi", r.get("put_oi", 0)) or 0
+        P += pcoi * wp
+        C += ccoi * wc
+    denom = abs(P) + abs(C)
+    score = ((P - C) / denom * 100.0) if denom > 0 else 0.0
+
+    # ---- history + flip detection ----
+    hist_key = f"meter_hist_{index_name}"
+    hist = st.session_state.get(hist_key, [])
+    hist.append((now_dt, score))
+    hist = [h for h in hist if (now_dt - h[0]).total_seconds() <= 5400]
+    st.session_state[hist_key] = hist
+
+    thr = meter_flip_threshold
+    confirm_n = 3
+    recent = [sc for _, sc in hist[-confirm_n:]]
+    older = [sc for t, sc in hist[:-confirm_n] if (now_dt - t).total_seconds() <= meter_flip_lookback * 60]
+    new_flip, from_val = None, None
+    if len(recent) == confirm_n and older:
+        if all(sc >= thr for sc in recent) and any(sc <= -thr for sc in older):
+            new_flip, from_val = "BULLISH", min(older)
+        elif all(sc <= -thr for sc in recent) and any(sc >= thr for sc in older):
+            new_flip, from_val = "BEARISH", max(older)
+
+    fkey = f"gate_state_flip_{index_name}"
+    fstate = st.session_state.get(fkey)
+    if fstate:
+        age = (now_dt - fstate["since"]).total_seconds()
+        crossed_back = (fstate["dir"] == "BULLISH" and score < 0) or (fstate["dir"] == "BEARISH" and score > 0)
+        if age > meter_flip_lookback * 60 or crossed_back:
+            fstate = None
+    if new_flip and (not fstate or fstate["dir"] != new_flip):
+        fstate = {"dir": new_flip, "since": now_dt, "from": from_val}
+    st.session_state[fkey] = fstate
+
+    if fstate:
+        res["flip"], res["flip_since"], res["flip_from"] = fstate["dir"], fstate["since"], fstate.get("from")
+        res["state"] = f"🔄 {fstate['dir']} FLIP"
+    elif score >= thr:
+        res["state"] = "BULLISH"
+    elif score <= -thr:
+        res["state"] = "BEARISH"
+    else:
+        res["state"] = "NEUTRAL"
+
+    g = greeks_by_strike.get(strikes[atm_idx]) or {}
+    cg, pg = g.get("call_iv"), g.get("put_iv")
+    res.update({"available": True, "score": score, "n_strikes": len(window),
+                "history": [sc for _, sc in hist][-120:],
+                "atm": {"strike": strikes[atm_idx],
+                        "call_delta": g.get("call_delta"), "put_delta": g.get("put_delta"),
+                        "gamma": g.get("call_gamma") or g.get("put_gamma"),
+                        "call_theta": g.get("call_theta"), "put_theta": g.get("put_theta"),
+                        "vega": g.get("call_vega") or g.get("put_vega"),
+                        "call_iv": cg, "put_iv": pg,
+                        "skew": (pg - cg) if (cg is not None and pg is not None) else None}})
+    return res
+
+def render_oi_meter(meter, label, spot_price):
+    if not meter.get("available"):
+        st.caption(f"🧭 {label} OI Flip Meter: {meter.get('msg', 'no data')}")
+        return
+    score = meter["score"]
+    thr = meter_flip_threshold
+    color = "#2e7d32" if score >= thr else ("#c62828" if score <= -thr else "#f9a825")
+    pos = max(0.0, min(100.0, (score + 100) / 2))
+    atm = meter["atm"]
+
+    flip_html = ""
+    if meter.get("flip"):
+        arrow = "🟢" if meter["flip"] == "BULLISH" else "🔴"
+        flip_html = (f'<div style="margin-top:8px; font-weight:bold;">{arrow} {meter["flip"]} FLIP — OI bias swung from '
+                     f'{_fv(meter.get("flip_from"), "+.0f")} to {score:+.0f} (detected {_fmt_t(meter.get("flip_since"))})</div>')
+
+    spark = ""
+    hist = meter.get("history", [])
+    if len(hist) >= 2:
+        W, H = 280, 44
+        pts = " ".join(f"{i * W / (len(hist) - 1):.1f},{H / 2 - sc / 100 * (H / 2):.1f}" for i, sc in enumerate(hist))
+        spark = (f'<svg width="{W}" height="{H}" style="margin-top:8px; background:#f4f7f9; border-radius:6px;">'
+                 f'<line x1="0" y1="{H / 2}" x2="{W}" y2="{H / 2}" stroke="#bbb" stroke-dasharray="3,3"/>'
+                 f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/></svg>'
+                 f'<span style="font-size:0.75rem; color:#555; margin-left:8px;">score history (since app opened)</span>')
+
+    items = [
+        ("Δ Call/Put", f"{_fv(atm['call_delta'], '.2f')} / {_fv(atm['put_delta'], '.2f')}"),
+        ("Γ Gamma", _fv(atm["gamma"], ".5f")),
+        ("Θ Theta C/P", f"{_fv(atm['call_theta'], '.1f')} / {_fv(atm['put_theta'], '.1f')}"),
+        ("V Vega", _fv(atm["vega"], ".2f")),
+        ("IV Call/Put", f"{_fv(atm['call_iv'], '.1f')}% / {_fv(atm['put_iv'], '.1f')}%"),
+        ("IV skew (P−C)", _fv(atm["skew"], "+.2f")),
+    ]
+    greeks_html = "".join(f'<span style="margin-right:18px;">{k}: <b>{v}</b></span>' for k, v in items)
+
+    html = (
+        f'<div class="greeks-panel" style="border-left-color: {color};">'
+        f'<b>🧭 {label} OI Flip Meter</b> &nbsp;|&nbsp; <b>{meter["state"]}</b> &nbsp;|&nbsp; '
+        f'Live {label}: <b>{spot_price:,.2f}</b> &nbsp;|&nbsp; ATM strike: <b>{atm["strike"]:,.0f}</b>'
+        f'<div style="position:relative; height:14px; border-radius:7px; margin:16px 4px 4px 4px; '
+        f'background:linear-gradient(90deg,#c62828 0%,#f9a825 50%,#2e7d32 100%);">'
+        f'<div style="position:absolute; left:{pos:.1f}%; top:-5px; width:4px; height:24px; background:#000; border-radius:2px;"></div></div>'
+        f'<div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#555;">'
+        f'<span>−100 Bearish</span><span>Score {score:+.0f}</span><span>Bullish +100</span></div>'
+        f'{flip_html}'
+        f'<div style="margin-top:8px; font-size:0.9rem;">ATM Greeks @ {atm["strike"]:,.0f}: {greeks_html}</div>'
+        f'{spark}'
+        f'<div style="font-size:0.78rem; color:#555; margin-top:6px;">Score = gamma-weighted (Put ΔOI − Call ΔOI) over '
+        f'{meter["n_strikes"]} strikes around live price. Green = put writing / call unwinding (support building); '
+        f'red = call writing / put unwinding (resistance building).</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+def process_index_signals(index_name, change_oi_response, spot_price, greeks, macro_score, flip=None):
     entry = None
     exit_sig = None
     if spot_price > 0 and change_oi_response.get("status") == "success":
@@ -1596,7 +1774,7 @@ def process_index_signals(index_name, change_oi_response, spot_price, greeks, ma
         exit_sig = get_exit_signal_from_change_oi(change_oi_response, spot_price, entry, buffer_points=27, min_gap=100, greeks_by_strike=greeks)
         if exit_sig is None:
             entry = None
-    entry, gate = apply_signal_gate(index_name, entry, spot_price, macro_score) if spot_price > 0 else (None, {"verdict": "NONE", "checks": [], "time_label": "—", "warning": "", "event": ""})
+    entry, gate = apply_signal_gate(index_name, entry, spot_price, macro_score, flip) if spot_price > 0 else (None, {"verdict": "NONE", "checks": [], "time_label": "—", "warning": "", "event": ""})
     # A locked entry may differ from the live one -> recompute its exit target against the locked entry
     if entry and gate.get("verdict") == "LOCKED" and change_oi_response.get("status") == "success":
         exit_sig = get_exit_signal_from_change_oi(change_oi_response, spot_price, entry, buffer_points=27, min_gap=100, greeks_by_strike=greeks)
@@ -1605,17 +1783,20 @@ def process_index_signals(index_name, change_oi_response, spot_price, greeks, ma
     return entry, exit_sig, gate
 # ===== GATE END =====
 
-nifty_entry_signal, nifty_exit_signal, nifty_gate = process_index_signals("Nifty", upstoxOiChangeResponse, nifty_price, nifty_greeks_by_strike, nifty_macro_score)
+nifty_meter = compute_oi_flip_meter("Nifty", upstoxOiChangeResponse, nifty_price, nifty_greeks_by_strike)
+nifty_entry_signal, nifty_exit_signal, nifty_gate = process_index_signals("Nifty", upstoxOiChangeResponse, nifty_price, nifty_greeks_by_strike, nifty_macro_score, nifty_meter)
 
 # ==============================
 # COMPUTE SENSEX SIGNALS (Code 5)
 # ==============================
-sensex_entry_signal, sensex_exit_signal, sensex_gate = process_index_signals("Sensex", upstoxSensexOiChangeResponse, sensex_price, sensex_greeks_by_strike, sensex_macro_score)
+sensex_meter = compute_oi_flip_meter("Sensex", upstoxSensexOiChangeResponse, sensex_price, sensex_greeks_by_strike)
+sensex_entry_signal, sensex_exit_signal, sensex_gate = process_index_signals("Sensex", upstoxSensexOiChangeResponse, sensex_price, sensex_greeks_by_strike, sensex_macro_score, sensex_meter)
 
 # ==============================
 # COMPUTE BANKNIFTY SIGNALS (Code 6)
 # ==============================
-banknifty_entry_signal, banknifty_exit_signal, banknifty_gate = process_index_signals("BankNifty", upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_greeks_by_strike, banknifty_macro_score)
+banknifty_meter = compute_oi_flip_meter("BankNifty", upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_greeks_by_strike)
+banknifty_entry_signal, banknifty_exit_signal, banknifty_gate = process_index_signals("BankNifty", upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_greeks_by_strike, banknifty_macro_score, banknifty_meter)
 
 # ==============================
 # TIMESTAMP
@@ -1681,6 +1862,7 @@ if index_selection == "Nifty":
         st.markdown(f'<div class="vix-alert">{vix_warning}</div>', unsafe_allow_html=True)
 
     # ---- Code 1: Nifty OI Change Entry/Exit (was Code 4) ----
+    render_oi_meter(nifty_meter, "Nifty", nifty_price)
     st.subheader("📊 Code 1 — Nifty OI Change Entry Signal")
     render_gate_panel(nifty_gate, "Nifty")
     if nifty_entry_signal:
@@ -1856,6 +2038,7 @@ elif index_selection == "Sensex":
     entry_datetime = sensex_gate["time_label"]
 
     # ---- Code 5 – Sensex Entry & Exit ----
+    render_oi_meter(sensex_meter, "Sensex", sensex_price)
     st.subheader("📊 Code 5 — Sensex OI Change Entry Signal")
     render_gate_panel(sensex_gate, "Sensex")
     if sensex_entry_signal:
@@ -1942,6 +2125,7 @@ elif index_selection == "BankNifty":
     entry_datetime = banknifty_gate["time_label"]
 
     # ---- Code 6 – BankNifty Entry & Exit ----
+    render_oi_meter(banknifty_meter, "BankNifty", banknifty_price)
     st.subheader("📊 Code 6 — BankNifty OI Change Entry Signal")
     render_gate_panel(banknifty_gate, "BankNifty")
     if banknifty_entry_signal:
