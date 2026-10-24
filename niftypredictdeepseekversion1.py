@@ -11,11 +11,45 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 import json
-import calendar
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
+# --- Reversal Meter: optional Plotly import ---
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    PLOTLY_AVAILABLE = True
+except Exception:
+    PLOTLY_AVAILABLE = False
+
+# --- Fragment availability (Streamlit >= 1.37 preferred) ---
+if hasattr(st, "fragment"):
+    _frag = st.fragment
+    _FRAGMENT_SUPPORTED = True
+elif hasattr(st, "experimental_fragment"):
+    _frag = st.experimental_fragment
+    _FRAGMENT_SUPPORTED = True
+else:
+    _frag = None
+    _FRAGMENT_SUPPORTED = False
+
 access_token = 'Bearer eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMDM2NjciLCJqdGkiOiI2OWQyMzJlMWNjZDUyZDRjZDQzMzc5NjYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc3NTM4MzI2NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODA2OTYyNDAwfQ.VFRZ5NP87NM1Vyn4-bCB2FAvanu4wsueNHo_POQtPv8'
+
+# ==============================
+# DEFAULT HARDCODED SETTINGS
+# ==============================
+w_gift = 0.35
+w_sgx = 0.25
+w_nasdaq = 0.15
+w_dax = 0.10
+w_dxy = -0.10
+w_usdinr = -0.10
+w_hangseng = 0.05
+
+vix_threshold = 20.0
+vix_dampener = 0.5
+india_vix_threshold = 25.0
+india_vix_dampener = 0.5
 
 # ==============================
 # PAGE CONFIG
@@ -35,58 +69,27 @@ if "page_config_done" not in st.session_state:
 st.markdown("""
     <style>
     .main { background-color: #f4f7f9; }
-    .market-box {
-        background-color: white;
-        padding: 18px;
-        border-radius: 12px;
-        border: 1px solid #e1e4e8;
-        box-shadow: 0px 4px 10px rgba(0,0,0,0.03);
-        margin-bottom: 15px;
-    }
-    .prediction-box {
-        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
-        color: white;
-        padding: 20px;
-        border-radius: 15px;
-        text-align: center;
-        margin-bottom: 15px;
-        position: relative;
-    }
+    .market-box { background-color: white; padding: 18px; border-radius: 12px;
+        border: 1px solid #e1e4e8; box-shadow: 0px 4px 10px rgba(0,0,0,0.03);
+        margin-bottom: 15px; }
+    .prediction-box { background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+        color: white; padding: 20px; border-radius: 15px; text-align: center;
+        margin-bottom: 15px; position: relative; }
     .prediction-achieved { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%) !important; }
-    .confidence-tag {
-        background: rgba(255,255,255,0.2);
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 0.9rem;
-        font-weight: bold;
-        display: inline-block;
-        margin-top: 10px;
-        border: 1px solid rgba(255,255,255,0.3);
-    }
-    .divergence-alert {
-        background-color: #f8d7da; color: #721c24;
-        padding: 12px 20px; border-radius: 10px;
-        border-left: 5px solid #dc3545;
-        margin-bottom: 20px; font-weight: bold;
-        font-size: 1.05rem; box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-    }
-    .vix-alert {
-        background-color: #fff3cd; color: #856404;
-        padding: 10px 20px; border-radius: 10px;
-        border-left: 5px solid #ffc107;
-        margin-bottom: 15px; font-weight: bold;
-    }
-    .status-badge {
-        position: absolute; top: 10px; right: 15px;
-        background: rgba(255,255,255,0.25); color: white;
-        padding: 2px 10px; border-radius: 8px;
-        font-size: 0.75rem; font-weight: bold; text-transform: uppercase;
-    }
-    .prediction-card {
-        padding: 30px; border-radius: 20px;
-        text-align: center; color: white;
-        margin-bottom: 15px; position: relative;
-    }
+    .confidence-tag { background: rgba(255,255,255,0.2); padding: 4px 12px;
+        border-radius: 20px; font-size: 0.9rem; font-weight: bold;
+        display: inline-block; margin-top: 10px; border: 1px solid rgba(255,255,255,0.3); }
+    .divergence-alert { background-color: #f8d7da; color: #721c24; padding: 12px 20px;
+        border-radius: 10px; border-left: 5px solid #dc3545; margin-bottom: 20px;
+        font-weight: bold; font-size: 1.05rem; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+    .vix-alert { background-color: #fff3cd; color: #856404; padding: 10px 20px;
+        border-radius: 10px; border-left: 5px solid #ffc107; margin-bottom: 15px;
+        font-weight: bold; }
+    .status-badge { position: absolute; top: 10px; right: 15px;
+        background: rgba(255,255,255,0.25); color: white; padding: 2px 10px;
+        border-radius: 8px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; }
+    .prediction-card { padding: 30px; border-radius: 20px; text-align: center;
+        color: white; margin-bottom: 15px; position: relative; }
     .bullish  { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
     .bearish  { background: linear-gradient(135deg, #cb2d3e 0%, #ef473a 100%); }
     .weak-bullish { background: linear-gradient(135deg, #2d6a4f 0%, #52b788 100%); }
@@ -106,82 +109,48 @@ st.markdown("""
     .positive, .pos { color: #00873c; font-weight: bold; }
     .negative, .neg { color: #eb4444; font-weight: bold; }
     .neutral-color  { color: #6e7781; }
-    .signal-score-bar {
-        background: rgba(255,255,255,0.15);
-        border-radius: 8px; padding: 8px 16px;
-        margin-top: 10px; font-size: 0.95rem;
-        display: inline-block;
-    }
-    .indicator-row {
-        display: flex; gap: 10px; flex-wrap: wrap;
-        margin-bottom: 12px;
-    }
-    .indicator-pill {
-        padding: 4px 12px; border-radius: 20px;
-        font-size: 0.8rem; font-weight: 600;
-        border: 1px solid rgba(0,0,0,0.08);
-    }
+    .signal-score-bar { background: rgba(255,255,255,0.15); border-radius: 8px;
+        padding: 8px 16px; margin-top: 10px; font-size: 0.95rem; display: inline-block; }
+    .indicator-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+    .indicator-pill { padding: 4px 12px; border-radius: 20px; font-size: 0.8rem;
+        font-weight: 600; border: 1px solid rgba(0,0,0,0.08); }
     .pill-green  { background:#d4edda; color:#155724; }
     .pill-red    { background:#f8d7da; color:#721c24; }
     .pill-yellow { background:#fff3cd; color:#856404; }
     .pill-gray   { background:#e9ecef; color:#495057; }
-    .momentum-badge {
-        display: inline-block; padding: 3px 12px; border-radius: 15px;
-        font-size: 0.8rem; font-weight: bold; margin-left: 8px;
-    }
-    /* New styles for Code 1 boxes */
-    .entry-box {
-        padding: 15px 20px;
-        border-radius: 12px;
-        margin-bottom: 20px;
-        color: #000000;
-        border-left: 6px solid;
-    }
-    .entry-box .status-badge-dark {
-        background: rgba(0,0,0,0.6);
-        color: white;
-        padding: 2px 10px;
-        border-radius: 8px;
-        font-size: 0.75rem;
-        font-weight: bold;
-        text-transform: uppercase;
-        margin-left: 10px;
-    }
-    .entry-box .status-text {
-        font-weight: bold;
-    }
-    .greeks-panel {
-        background: white;
-        padding: 12px 18px;
-        border-radius: 10px;
-        border-left: 5px solid;
-        margin-bottom: 15px;
-        color: #000;
-    }
-    .greeks-panel .badge-pass {
-        background-color: #2e7d32;
-        color: white;
-        padding: 2px 10px;
-        border-radius: 12px;
-        font-weight: bold;
-        font-size: 0.8rem;
-    }
-    .greeks-panel .badge-weak {
-        background-color: #f9a825;
-        color: #000;
-        padding: 2px 10px;
-        border-radius: 12px;
-        font-weight: bold;
-        font-size: 0.8rem;
-    }
-    .greeks-panel .greek-item {
-        display: inline-block;
-        margin-right: 20px;
-        font-size: 0.9rem;
-    }
-    .greeks-panel .greek-item b {
-        color: #1a1a1a;
-    }
+    .momentum-badge { display: inline-block; padding: 3px 12px; border-radius: 15px;
+        font-size: 0.8rem; font-weight: bold; margin-left: 8px; }
+    .entry-box { padding: 15px 20px; border-radius: 12px; margin-bottom: 20px;
+        color: #000000; border-left: 6px solid; }
+    .entry-box .status-badge-dark { background: rgba(0,0,0,0.6); color: white;
+        padding: 2px 10px; border-radius: 8px; font-size: 0.75rem;
+        font-weight: bold; text-transform: uppercase; margin-left: 10px; }
+    .entry-box .status-text { font-weight: bold; }
+    .greeks-panel { background: white; padding: 12px 18px; border-radius: 10px;
+        border-left: 5px solid; margin-bottom: 15px; color: #000; }
+    .greeks-panel .badge-pass { background-color: #2e7d32; color: white;
+        padding: 2px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
+    .greeks-panel .badge-weak { background-color: #f9a825; color: #000;
+        padding: 2px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
+    .greeks-panel .greek-item { display: inline-block; margin-right: 20px; font-size: 0.9rem; }
+    .greeks-panel .greek-item b { color: #1a1a1a; }
+    /* Reversal Meter */
+    .rev-card { background: white; padding: 14px 18px; border-radius: 12px;
+        border-left: 5px solid; margin-bottom: 12px; color: #000;
+        box-shadow: 0px 2px 6px rgba(0,0,0,0.04); }
+    .rev-card .rev-title { font-weight: 800; font-size: 1.05rem; margin-bottom: 6px; }
+    .rev-card .rev-sub   { font-size: 0.85rem; color: #555; }
+    .rev-pill { display: inline-block; padding: 2px 10px; border-radius: 12px;
+        font-size: 0.78rem; font-weight: 700; margin-left: 6px; }
+    .rev-pill-green  { background:#d4edda; color:#155724; }
+    .rev-pill-red    { background:#f8d7da; color:#721c24; }
+    .rev-pill-yellow { background:#fff3cd; color:#856404; }
+    .rev-pill-gray   { background:#e9ecef; color:#495057; }
+    .rev-alert-item { padding: 8px 12px; border-radius: 8px; margin-bottom: 6px;
+        font-size: 0.86rem; border-left: 4px solid; }
+    .rev-alert-bear { background:#fdecea; border-color:#c62828; }
+    .rev-alert-bull { background:#e8f5e9; border-color:#2e7d32; }
+    .rev-alert-neutral { background:#f1f3f5; border-color:#6c757d; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -199,16 +168,14 @@ def inr_format(num):
         parts.insert(0, remaining)
     return ",".join(parts + [last_three])
 
-# Auto date (today, IST) and auto weekly expiry (next Tuesday, IST)
+# Auto date (today, IST) and auto weekly expiry
 ist_now = datetime.now(pytz.timezone("Asia/Kolkata"))
 today_str = ist_now.strftime('%Y-%m-%d')
 
-days_until_tuesday = (1 - ist_now.weekday()) % 7  # Monday=0 ... Tuesday=1
+days_until_tuesday = (1 - ist_now.weekday()) % 7
 expiry_date = ist_now + dt_mod.timedelta(days=days_until_tuesday)
 expiry_str = expiry_date.strftime('%Y-%m-%d')
 
-# Holiday-safe expiry: ask Upstox for the real upcoming expiry (handles holiday shifts like
-# Dussehra 20-Oct-2026 -> Nifty expiry moves to Mon 19-Oct). Falls back to the computed date.
 @st.cache_data(ttl=1800)
 def get_nearest_expiry(instrument_key, fallback_str, today_key):
     try:
@@ -229,162 +196,80 @@ def get_nearest_expiry(instrument_key, fallback_str, today_key):
 
 expiry_str = get_nearest_expiry('NSE_INDEX|Nifty 50', expiry_str, today_str)
 
-# Sensex weekly expiry is Thursday (BSE, effective 4 Sep 2025)
-days_until_thursday = (3 - ist_now.weekday()) % 7  # Monday=0 ... Thursday=3
-sensex_expiry_date = ist_now + dt_mod.timedelta(days=days_until_thursday)
-sensex_expiry_str = sensex_expiry_date.strftime('%Y-%m-%d')
-
-# BankNifty expiry — NSE moved BankNifty to MONTHLY-only expiry (last Tuesday of the month);
-# it no longer shares Nifty's weekly Tuesday cycle.
-def _last_weekday_of_month(year, month, weekday):
-    """weekday: Monday=0 ... Sunday=6. Returns the last occurrence of that weekday in the given month."""
-    last_day = calendar.monthrange(year, month)[1]
-    d = dt_mod.date(year, month, last_day)
-    offset = (d.weekday() - weekday) % 7
-    return d - dt_mod.timedelta(days=offset)
-
-_today_date = ist_now.date()
-_banknifty_expiry_date = _last_weekday_of_month(_today_date.year, _today_date.month, 1)  # 1 = Tuesday
-if _banknifty_expiry_date < _today_date:
-    _next_month = _today_date.month + 1
-    _next_year = _today_date.year
-    if _next_month > 12:
-        _next_month = 1
-        _next_year += 1
-    _banknifty_expiry_date = _last_weekday_of_month(_next_year, _next_month, 1)
-banknifty_expiry_str = _banknifty_expiry_date.strftime('%Y-%m-%d')
-
-def fetch_upstox_oi_change_data():
+# ==============================
+# RAW UPSTOX FETCHERS (parameterised so they can be cached)
+# ==============================
+def _fetch_change_oi_raw(instrument_key, expiry, date, interval=2):
     url = 'https://api.upstox.com/v2/market/change-oi'
-    params = {
-        'instrument_key': 'NSE_INDEX|Nifty 50',
-        'expiry': expiry_str,
-        'date': today_str,
-        'interval': 2
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
-    response = requests.get(url, params=params, headers=headers)
-    return json.loads(response.text)
+    params = {'instrument_key': instrument_key, 'expiry': expiry, 'date': date, 'interval': interval}
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json',
+               'Authorization': access_token}
+    r = requests.get(url, params=params, headers=headers, timeout=6)
+    return json.loads(r.text)
 
-upstoxOiChangeResponse = fetch_upstox_oi_change_data()
+def _fetch_oi_raw(instrument_key, expiry, date):
+    url = 'https://api.upstox.com/v2/market/oi'
+    params = {'instrument_key': instrument_key, 'expiry': expiry, 'date': date}
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json',
+               'Authorization': access_token}
+    r = requests.get(url, params=params, headers=headers, timeout=6)
+    return json.loads(r.text)
+
+def _fetch_spot_raw():
+    try:
+        r = requests.get(
+            'https://api.upstox.com/v2/market-quote/quotes',
+            params={'instrument_key': 'NSE_INDEX|Nifty 50'},
+            headers={'Accept': 'application/json', 'Authorization': access_token},
+            timeout=4
+        )
+        d = json.loads(r.text)
+        if d.get("status") != "success":
+            return None
+        for k, v in (d.get("data") or {}).items():
+            lp = v.get("last_price")
+            if lp:
+                return float(lp)
+    except Exception as e:
+        print(f"spot fetch error: {e}")
+    return None
+
+# Cached wrappers — TTL=4 s so fragment (5 s cadence) always gets fresh data
+@st.cache_data(ttl=4, show_spinner=False)
+def _sampled_change_oi(instrument_key, expiry, date):
+    return _fetch_change_oi_raw(instrument_key, expiry, date)
+
+@st.cache_data(ttl=4, show_spinner=False)
+def _sampled_oi(instrument_key, expiry, date):
+    return _fetch_oi_raw(instrument_key, expiry, date)
+
+@st.cache_data(ttl=4, show_spinner=False)
+def _sampled_spot():
+    return _fetch_spot_raw()
+
+# Original fetchers (used by main flow — preserved as-is, no behavioural change)
+def fetch_upstox_oi_change_data():
+    return _fetch_change_oi_raw('NSE_INDEX|Nifty 50', expiry_str, today_str, interval=2)
 
 def fetch_upstox_oi_data():
-    url = 'https://api.upstox.com/v2/market/oi'
-    params = {
-        'instrument_key': 'NSE_INDEX|Nifty 50',
-        'expiry': expiry_str,
-        'date': today_str
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
-    response = requests.get(url, params=params, headers=headers)
-    return json.loads(response.text)
+    return _fetch_oi_raw('NSE_INDEX|Nifty 50', expiry_str, today_str)
 
+upstoxOiChangeResponse = fetch_upstox_oi_change_data()
 upstoxOiResponse = fetch_upstox_oi_data()
 data = upstoxOiResponse["data"]
 
-def fetch_upstox_sensex_oi_change_data():
-    url = 'https://api.upstox.com/v2/market/change-oi'
-    params = {
-        'instrument_key': 'BSE_INDEX|SENSEX',
-        'expiry': sensex_expiry_str,
-        'date': today_str,
-        'interval': 2
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
-    response = requests.get(url, params=params, headers=headers)
-    return json.loads(response.text)
-
-upstoxSensexOiChangeResponse = fetch_upstox_sensex_oi_change_data()
-
-def fetch_upstox_sensex_oi_data():
-    url = 'https://api.upstox.com/v2/market/oi'
-    params = {
-        'instrument_key': 'BSE_INDEX|SENSEX',
-        'expiry': sensex_expiry_str,
-        'date': today_str
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
-    response = requests.get(url, params=params, headers=headers)
-    return json.loads(response.text)
-
-upstoxSensexOiResponse = fetch_upstox_sensex_oi_data()
-
-def fetch_upstox_banknifty_oi_change_data():
-    url = 'https://api.upstox.com/v2/market/change-oi'
-    params = {
-        'instrument_key': 'NSE_INDEX|Nifty Bank',
-        'expiry': banknifty_expiry_str,
-        'date': today_str,
-        'interval': 2
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
-    response = requests.get(url, params=params, headers=headers)
-    return json.loads(response.text)
-
-upstoxBankNiftyOiChangeResponse = fetch_upstox_banknifty_oi_change_data()
-
-def fetch_upstox_banknifty_oi_data():
-    url = 'https://api.upstox.com/v2/market/oi'
-    params = {
-        'instrument_key': 'NSE_INDEX|Nifty Bank',
-        'expiry': banknifty_expiry_str,
-        'date': today_str
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
-    response = requests.get(url, params=params, headers=headers)
-    return json.loads(response.text)
-
-upstoxBankNiftyOiResponse = fetch_upstox_banknifty_oi_data()
-
 # ==============================
-# OPTION CHAIN + GREEKS (Delta / Gamma / Theta / Vega / IV)
-# Used by Code 4 & 5 to filter/score entry-exit strikes
+# OPTION CHAIN + GREEKS
 # ==============================
 def fetch_option_chain(instrument_key, expiry_date):
     url = 'https://api.upstox.com/v2/option/chain'
-    params = {
-        'instrument_key': instrument_key,
-        'expiry_date': expiry_date
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
+    params = {'instrument_key': instrument_key, 'expiry_date': expiry_date}
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json',
+               'Authorization': access_token}
     response = requests.get(url, params=params, headers=headers)
     return json.loads(response.text)
 
 def parse_greeks_by_strike(option_chain_response):
-    """
-    Returns { strike_price: {
-        'call_delta','call_gamma','call_theta','call_vega','call_iv',
-        'put_delta','put_gamma','put_theta','put_vega','put_iv'
-    }}
-    """
     greeks_map = {}
     if option_chain_response.get("status") != "success":
         return greeks_map
@@ -405,58 +290,35 @@ def parse_greeks_by_strike(option_chain_response):
     return greeks_map
 
 def compute_greeks_confidence(entry_type, greeks):
-    """
-    Scores how much a strike's OI build-up actually matters to spot price,
-    using Delta (relevance), Gamma (price sensitivity), Theta (decay risk), IV (context).
-    Returns (confidence_0_100, delta_ok, notes_list).
-    """
     if not greeks:
         return 40.0, True, ["⚪ No Greeks data — falling back to OI-only confidence"]
-
     notes = []
     if entry_type == "HIGH PUT":
-        delta = abs(greeks.get("put_delta", 0))
-        gamma = greeks.get("put_gamma", 0)
-        theta = greeks.get("put_theta", 0)
-        iv    = greeks.get("put_iv", 0)
+        delta = abs(greeks.get("put_delta", 0)); gamma = greeks.get("put_gamma", 0)
+        theta = greeks.get("put_theta", 0); iv = greeks.get("put_iv", 0)
     else:
-        delta = abs(greeks.get("call_delta", 0))
-        gamma = greeks.get("call_gamma", 0)
-        theta = greeks.get("call_theta", 0)
-        iv    = greeks.get("call_iv", 0)
-
-    # Too near 0 delta = strike is too far OTM to matter; too near 1 = deep ITM, already priced in.
+        delta = abs(greeks.get("call_delta", 0)); gamma = greeks.get("call_gamma", 0)
+        theta = greeks.get("call_theta", 0); iv = greeks.get("call_iv", 0)
     delta_ok = 0.15 <= delta <= 0.75
     notes.append(f"{'✅' if delta_ok else '⚠️'} Delta {delta:.2f} {'in' if delta_ok else 'outside'} relevant band (0.15–0.75)")
-
-    delta_score = max(0, 100 - abs(delta - 0.45) * 150)   # peaks near 0.45 delta (slightly OTM, high-OI zone)
-    gamma_score = min(100, gamma * 5000)                    # gamma is typically 0.0005–0.02, scale up
-    theta_penalty = min(30, max(0, -theta))                 # steep decay trims confidence a bit
-
+    delta_score = max(0, 100 - abs(delta - 0.45) * 150)
+    gamma_score = min(100, gamma * 5000)
+    theta_penalty = min(30, max(0, -theta))
     if theta < -5:
         notes.append(f"🔥 Theta {theta:.2f}/day — fast premium decay if trading the option itself")
     if iv:
         notes.append(f"📈 IV: {iv:.1f}%")
-
     confidence = round(max(0, min(100, 0.55 * delta_score + 0.35 * gamma_score - 0.10 * theta_penalty)), 1)
     return confidence, delta_ok, notes
 
 nifty_option_chain_response = fetch_option_chain('NSE_INDEX|Nifty 50', expiry_str)
 nifty_greeks_by_strike = parse_greeks_by_strike(nifty_option_chain_response)
 
-sensex_option_chain_response = fetch_option_chain('BSE_INDEX|SENSEX', sensex_expiry_str)
-sensex_greeks_by_strike = parse_greeks_by_strike(sensex_option_chain_response)
-
-banknifty_option_chain_response = fetch_option_chain('NSE_INDEX|Nifty Bank', banknifty_expiry_str)
-banknifty_greeks_by_strike = parse_greeks_by_strike(banknifty_option_chain_response)
-
 def reusable_display_oi_data(upstoxResponse, title):
-    # Guard: API can return status "success" with data = None (market closed / data not published yet)
     if not upstoxResponse or not upstoxResponse.get("data"):
         st.subheader(title)
         st.info("ℹ️ No data available right now (market closed or data not yet published).")
         return
-
     data = upstoxResponse["data"]
     Total_Puts = 0
     Total_Calls = 0
@@ -507,17 +369,14 @@ def reusable_display_oi_data(upstoxResponse, title):
             return ["background-color: #ffd700; font-weight: bold; color: #000000;"] * len(row)
         return [""] * len(row)
 
-    # Show the default numeric index column (0,1,2,…) as requested
     st.dataframe(top_20.style.apply(highlight_top5, axis=1))
 
 # ==============================
 # GLOBAL CONFIG & TIMING
 # ==============================
-st_autorefresh(interval=15_000, key="global_sync_refresh")
 ist = pytz.timezone("Asia/Kolkata")
 now = datetime.now(ist)
 today = now.strftime("%Y-%m-%d")
-
 CHINA_CLOSE_TIME = time(12, 30)
 is_after_china = now.time() >= CHINA_CLOSE_TIME
 excel_file = "Market_Data.xlsx"
@@ -528,35 +387,14 @@ excel_file = "Market_Data.xlsx"
 with st.sidebar:
     st.title("🎯 Predictor Settings")
     st.sidebar.markdown(f"### 🕒 IST: {now.strftime('%H:%M:%S')}")
-
-    # Index selector
-    index_selection = st.radio(
-        "Select Index",
-        ["Nifty", "Sensex", "BankNifty"],
-        index=0,
-        help="Switch between Nifty, Sensex, and BankNifty data views."
-    )
     st.markdown("---")
 
-    st.markdown("#### Code 1 — Global Weights")
-    w_gift    = st.slider("GIFT Nifty",     0.0, 1.0, 0.35, 0.05, key="w_gift")
-    w_sgx     = st.slider("BankNifty Fut Weight", 0.0, 1.0, 0.25, 0.05, key="w_sgx")
-    w_nasdaq  = st.slider("Nasdaq 100",     0.0, 1.0, 0.15, 0.05, key="w_nasdaq")
-    w_dax     = st.slider("DAX",            0.0, 1.0, 0.10, 0.05, key="w_dax")
-    w_dxy     = st.slider("Dollar Index",  -1.0, 0.0,-0.10, 0.05, key="w_dxy")
-    w_usdinr  = st.slider("USD/INR",       -1.0, 0.0,-0.10, 0.05, key="w_usdinr")
-    w_hangseng= st.slider("Hang Seng",      0.0, 1.0, 0.05, 0.05, key="w_hangseng")
-
-    st.markdown("---")
-    st.markdown("#### VIX Filters")
-    vix_threshold = st.slider("US VIX Danger Level", 15.0, 35.0, 20.0, 0.5, key="vix_thresh")
-    vix_dampener  = st.slider("US VIX Dampening Factor", 0.0, 1.0, 0.5, 0.05, key="vix_damp")
-    india_vix_threshold = st.slider("India VIX Danger Level", 15.0, 45.0, 25.0, 0.5, key="india_vix_thresh")
-    india_vix_dampener  = st.slider("India VIX Dampening Factor", 0.0, 1.0, 0.5, 0.05, key="india_vix_damp")
-
-    st.markdown("---")
-    st.markdown("#### Code 2 — Signal Gate")
-    min_signal_score = st.slider("Min Signal Score (0–5)", 0, 5, 3, 1, key="min_score")
+    st.markdown("#### ⚡ Refresh Cadence")
+    refresh_sec = st.slider("Main page refresh (sec)", 5, 60, 15, 1, key="page_refresh_sec",
+                            help="Whole-page rerun interval. Reversal Meter uses a faster "
+                                 "independent 5-second sampler underneath.")
+    st.caption(f"🔁 Reversal sampler: **5 s** (independent). "
+               f"Fragment API: {'✅ available' if _FRAGMENT_SUPPORTED else '⚠️ not available — will run at page cadence'}")
 
     st.markdown("---")
     st.markdown("#### 🚀 Momentum Settings")
@@ -585,18 +423,33 @@ with st.sidebar:
         for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("gate_state_")]:
             del st.session_state[_k]
 
+    st.markdown("---")
+    st.markdown("#### 🔄 Change-in-OI Reversal Meter")
+    rev_enabled          = st.checkbox("Enable Reversal Meter", value=True, key="rev_enabled")
+    rev_window_strikes   = st.slider("Strikes each side of ATM", 3, 25, 10, 1, key="rev_win")
+    rev_lookback         = st.slider("Anomaly baseline (snapshots)", 3, 30, 6, 1, key="rev_look")
+    rev_z_threshold      = st.slider("Anomaly Z-threshold", 1.0, 4.0, 2.0, 0.1, key="rev_z")
+    rev_min_abs_lakh     = st.slider("Min abs change (lakh contracts)", 1, 200, 5, 1, key="rev_minabs")
+    rev_cooldown_min     = st.slider("Alert cooldown (minutes)", 1, 30, 5, 1, key="rev_cool")
+    if st.button("🧹 Clear reversal snapshots", key="rev_clear"):
+        for _k in ["rev_snapshots", "rev_alerts", "rev_cooldowns"]:
+            st.session_state.pop(_k, None)
+
     if is_after_china:
         st.sidebar.success("China Logic: ACTIVE")
     else:
         st.sidebar.warning("Waiting for 12:30 PM IST")
 
 # ==============================
+# Register autorefresh AFTER sidebar so it uses the chosen interval
+# ==============================
+st_autorefresh(interval=refresh_sec * 1000, key=f"global_sync_refresh_{refresh_sec}")
+
+# ==============================
 # MASTER INSTRUMENT LIST
 # ==============================
 master_symbols = [
     {"market": "India",      "name": "NIFTY 50",    "tv_symbol": "NSE:NIFTY",        "start": "09:15", "end": "15:30", "icon": "🇮🇳", "w": 0,          "trigger_alignment": False, "category": "india"},
-    {"market": "India",      "name": "SENSEX",      "tv_symbol": "BSE:SENSEX",       "start": "09:15", "end": "15:30", "icon": "🇮🇳", "w": 0,          "trigger_alignment": False, "category": "india"},
-    {"market": "India",      "name": "BANK NIFTY",  "tv_symbol": "NSE:BANKNIFTY",    "start": "09:15", "end": "15:30", "icon": "🇮🇳", "w": 0,          "trigger_alignment": False, "category": "india"},
     {"market": "Gift City",  "name": "GIFT Nifty",  "tv_symbol": "NSEIX:NIFTY1!",    "start": "06:30", "end": "02:45", "icon": "🎁", "w": w_gift,     "trigger_alignment": True,  "category": "nifty_futures"},
     {"market": "NSE Intl",   "name": "BankNifty Fut","tv_symbol": "NSEIX:BANKNIFTY1!","start": "06:30", "end": "03:00", "icon": "🏦", "w": w_sgx,      "trigger_alignment": True,  "category": "nifty_futures"},
     {"market": "USA",        "name": "Nasdaq 100",  "tv_symbol": "NASDAQ:NDX",       "start": "20:00", "end": "02:30", "icon": "🇺🇸", "w": w_nasdaq,   "trigger_alignment": True,  "category": "us"},
@@ -615,378 +468,14 @@ master_symbols = [
 TV_URL  = "https://scanner.tradingview.com/global/scan"
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 SESSION = requests.Session()
-retry_strategy = Retry(
-    total=3,
-    backoff_factor=0.5,
-    status_forcelist=[429, 500, 502, 503, 504]
-)
+retry_strategy = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=20, pool_maxsize=20)
 SESSION.mount("http://", adapter)
 SESSION.mount("https://", adapter)
 
-def fetch_master_data(symbol_dict):
-    # Nifty / Sensex / BankNifty come from Upstox (prefetched below); others stay on TradingView
-    if symbol_dict["name"] in UPSTOX_INDEX_KEYS and symbol_dict["name"] in upstox_index_quotes:
-        return symbol_dict, upstox_index_quotes[symbol_dict["name"]]
-    payload = {
-        "symbols": {"tickers": [symbol_dict["tv_symbol"]], "query": {"types": []}},
-        "columns": ["close", "change", "change_abs"]
-    }
-    try:
-        r = SESSION.post(TV_URL, json=payload, headers=HEADERS, timeout=5)
-        r.raise_for_status()
-        d = r.json()["data"][0]["d"]
-        close, pct, change_abs = d[0], d[1], d[2]
-        prev_close = close - change_abs
-        return symbol_dict, (round(prev_close, 2), round(close, 2), round(change_abs, 2), round(pct, 2))
-    except Exception as e:
-        print(f"Error fetching {symbol_dict['name']}: {e}")
-        return symbol_dict, None
-
-def calculate_momentum_score(nifty_price, nifty_prev_close, lookback_minutes=15):
-    try:
-        change_pct = ((nifty_price - nifty_prev_close) / nifty_prev_close) * 100 if nifty_prev_close > 0 else 0
-        if change_pct < -0.5:
-            return -2, "STRONG_BEARISH", change_pct
-        elif change_pct < -0.25:
-            return -1, "BEARISH", change_pct
-        elif change_pct > 0.5:
-            return 2, "STRONG_BULLISH", change_pct
-        elif change_pct > 0.25:
-            return 1, "BULLISH", change_pct
-        else:
-            return 0, "NEUTRAL", change_pct
-    except:
-        return 0, "NEUTRAL", 0
-
-# ==============================
-# ENHANCED PREDICTION FUNCTIONS (Code 1 & 2)
-# ==============================
-def detect_domestic_pressure(nifty_change_pct, sgx_pct, gift_pct, nifty_price, nifty_prev_close):
-    pressure_score = 0
-    pressure_type = "ALIGNED"
-    reasons = []
-    if abs(sgx_pct) > 0.1 and abs(gift_pct) > 0.1:
-        avg_futures = (sgx_pct + gift_pct) / 2
-        if nifty_change_pct < -0.15 and avg_futures > 0:
-            divergence = abs(nifty_change_pct) / (abs(avg_futures) + 0.01)
-            if divergence > 1.5:
-                pressure_type = "HIGH_DOMESTIC_SELLING"
-                pressure_score = divergence * nifty_change_pct * -1
-                reasons.append(f"🔴 High domestic selling: Nifty {nifty_change_pct:+.2f}% vs futures {avg_futures:+.2f}%")
-            elif divergence > 0.8:
-                pressure_type = "MODERATE_DOMESTIC_SELLING"
-                pressure_score = divergence * nifty_change_pct * -1
-                reasons.append(f"🟡 Moderate domestic selling: divergence {divergence:.1f}x")
-    if nifty_price > 0 and nifty_prev_close > 0:
-        range_size = abs(nifty_price - nifty_prev_close) / nifty_prev_close * 100
-        if range_size > 0.5 and pressure_type == "ALIGNED":
-            if nifty_change_pct < -0.3:
-                pressure_type = "STRONG_DOWN_MOMENTUM"
-                pressure_score = abs(nifty_change_pct) * 2
-                reasons.append(f"🔴 Strong downward momentum: {nifty_change_pct:+.2f}%")
-            elif nifty_change_pct > 0.3:
-                pressure_type = "STRONG_UP_MOMENTUM"
-                pressure_score = abs(nifty_change_pct) * 2
-                reasons.append(f"✅ Strong upward momentum: {nifty_change_pct:+.2f}%")
-    return pressure_type, pressure_score, reasons
-
-def apply_domestic_override(sentiment_score, pressure_type, pressure_score, momentum_score):
-    if "SELLING" in pressure_type:
-        if sentiment_score > 0:
-            reduction = min(0.95, pressure_score * 0.15)
-            return sentiment_score * (1 - reduction), f"🛑 Domestic Selling Override: {reduction:.0%} reduction"
-        else:
-            amplification = min(1.5, 1 + pressure_score * 0.05)
-            return sentiment_score * amplification, f"⬇️ Bearish amplified: {amplification:.1f}x"
-    elif "MOMENTUM" in pressure_type:
-        if pressure_type == "STRONG_DOWN_MOMENTUM" and sentiment_score > 0:
-            reduction = min(0.9, 0.7 + abs(pressure_score) * 0.05)
-            return sentiment_score * (1 - reduction), f"📉 Down Momentum Override: {reduction:.0%} reduction"
-        elif pressure_type == "STRONG_UP_MOMENTUM" and sentiment_score < 0:
-            reduction = min(0.9, 0.7 + abs(pressure_score) * 0.05)
-            return sentiment_score * (1 - reduction), f"📈 Up Momentum Override: {reduction:.0%} reduction"
-    return sentiment_score, "No override"
-
-def calculate_confidence_score(weighted_pcts, vix_value, india_vix_value, nifty_change_pct, pressure_type):
-    if len(weighted_pcts) > 1:
-        std_dev = np.std(weighted_pcts)
-        base_confidence = max(0, min(100, 100 - (std_dev * 20)))
-        # US VIX bonus
-        vix_bonus = max(0, (20 - vix_value) * 0.5) if vix_value > 0 else 0
-        # India VIX bonus
-        india_vix_bonus = max(0, (20 - india_vix_value) * 0.3) if india_vix_value > 0 else 0
-        pressure_penalty = 0
-        if "SELLING" in pressure_type and nifty_change_pct < -0.2:
-            pressure_penalty = min(30, abs(nifty_change_pct) * 30)
-        elif "BUYING" in pressure_type and nifty_change_pct > 0.2:
-            pressure_penalty = min(30, abs(nifty_change_pct) * 30)
-        confidence = min(100, base_confidence + vix_bonus + india_vix_bonus - pressure_penalty)
-        return confidence
-    elif len(weighted_pcts) == 1:
-        return 40.0
-    return 0
-
-def compute_signal_score_enhanced(trigger_pcts, china_pct, sgx_pct, vix_val, usdinr_pct,
-                                  hangseng_pct, nifty_change_pct, pressure_type, momentum_label):
-    bull_votes, bear_votes = 0, 0
-    reasons = []
-    trigger_positives = sum(1 for x in trigger_pcts if x > 0)
-    trigger_negatives = sum(1 for x in trigger_pcts if x < 0)
-    trigger_total = len(trigger_pcts)
-    if trigger_total > 0:
-        if trigger_positives >= int(trigger_total * 0.6):
-            bull_votes += 1; reasons.append(f"✅ {trigger_positives}/{trigger_total} global triggers bullish")
-        elif trigger_negatives >= int(trigger_total * 0.6):
-            bear_votes += 1; reasons.append(f"🔴 {trigger_negatives}/{trigger_total} global triggers bearish")
-        else:
-            reasons.append(f"⚪ Mixed trigger signals ({trigger_positives}↑ {trigger_negatives}↓)")
-    if china_pct > 0.3:
-        bull_votes += 1; reasons.append(f"✅ CSI 300 bullish ({china_pct:+.2f}%)")
-    elif china_pct < -0.3:
-        bear_votes += 1; reasons.append(f"🔴 CSI 300 bearish ({china_pct:+.2f}%)")
-    else:
-        reasons.append(f"⚪ CSI 300 flat ({china_pct:+.2f}%)")
-    if sgx_pct > 0.2:
-        bull_votes += 1; reasons.append(f"✅ BankNifty Fut bullish ({sgx_pct:+.2f}%)")
-    elif sgx_pct < -0.2:
-        bear_votes += 1; reasons.append(f"🔴 BankNifty Fut bearish ({sgx_pct:+.2f}%)")
-    else:
-        reasons.append(f"⚪ BankNifty Fut flat ({sgx_pct:+.2f}%)")
-    if vix_val > 0:
-        if vix_val < 15:
-            bull_votes += 1; reasons.append(f"✅ VIX calm ({vix_val:.1f})")
-        elif vix_val > vix_threshold:
-            bear_votes += 1; reasons.append(f"🔴 VIX elevated ({vix_val:.1f})")
-        else:
-            reasons.append(f"⚪ VIX neutral ({vix_val:.1f})")
-    if usdinr_pct < -0.1:
-        bull_votes += 1; reasons.append(f"✅ Rupee strengthening ({usdinr_pct:+.2f}%)")
-    elif usdinr_pct > 0.2:
-        bear_votes += 1; reasons.append(f"🔴 Rupee weakening ({usdinr_pct:+.2f}%)")
-    else:
-        reasons.append(f"⚪ USD/INR stable ({usdinr_pct:+.2f}%)")
-    if "SELLING" in pressure_type:
-        bear_votes += 2; reasons.append(f"🔴🔴 DOMESTIC SELLING PRESSURE")
-    elif "BUYING" in pressure_type:
-        bull_votes += 2; reasons.append(f"✅✅ DOMESTIC BUYING PRESSURE")
-    if "STRONG_BEARISH" in momentum_label:
-        bear_votes += 2; reasons.append(f"🔴🔴 STRONG DOWN MOMENTUM")
-    elif "BEARISH" in momentum_label:
-        bear_votes += 1; reasons.append(f"🔴 Down momentum")
-    elif "STRONG_BULLISH" in momentum_label:
-        bull_votes += 2; reasons.append(f"✅✅ STRONG UP MOMENTUM")
-    elif "BULLISH" in momentum_label:
-        bull_votes += 1; reasons.append(f"✅ Up momentum")
-    if bull_votes > bear_votes:
-        direction = "BULLISH"; score = bull_votes
-    elif bear_votes > bull_votes:
-        direction = "BEARISH"; score = bear_votes
-    else:
-        direction = "NEUTRAL"; score = 0
-    return direction, score, bull_votes, bear_votes, reasons
-
-# ==============================
-# CODE 3 – OI + Change OI + Flow Predictor
-# ==============================
-def compute_oi_signal(oi_data_list, spot_price, change_oi_data_list=None, macro_flow_score=None):
-    total_calls = sum(item["call_oi"] for item in oi_data_list)
-    total_puts = sum(item["put_oi"] for item in oi_data_list)
-    pcr = total_puts / total_calls if total_calls > 0 else 1.0
-
-    max_call_strike = max(oi_data_list, key=lambda x: x["call_oi"])["strike_price"]
-    max_put_strike = max(oi_data_list, key=lambda x: x["put_oi"])["strike_price"]
-
-    def max_pain(strikes, data):
-        best, min_pain = strikes[0], float('inf')
-        for s in strikes:
-            pain = sum(item["call_oi"] * max(s - item["strike_price"], 0) +
-                       item["put_oi"] * max(item["strike_price"] - s, 0) for item in data)
-            if pain < min_pain:
-                min_pain, best = pain, s
-        return best
-
-    strikes = [item["strike_price"] for item in oi_data_list]
-    max_pain_strike = max_pain(strikes, oi_data_list)
-
-    # Change OI metrics
-    net_call_change = 0
-    net_put_change = 0
-    max_call_change_strike = None
-    max_put_change_strike = None
-    max_call_change_val = 0
-    max_put_change_val = 0
-
-    if change_oi_data_list:
-        for item in change_oi_data_list:
-            ccoi = item.get("call_change_oi") or 0
-            pcoi = item.get("put_change_oi") or 0
-            net_call_change += ccoi
-            net_put_change += pcoi
-            if ccoi > max_call_change_val:
-                max_call_change_val = ccoi
-                max_call_change_strike = item["strike_price"]
-            if pcoi > max_put_change_val:
-                max_put_change_val = pcoi
-                max_put_change_strike = item["strike_price"]
-
-    bull_votes, bear_votes = 0, 0
-
-    # 1. Max Pain
-    if spot_price > max_pain_strike:    bear_votes += 1
-    elif spot_price < max_pain_strike:  bull_votes += 1
-
-    # 2. PCR
-    if pcr > 1.5:      bear_votes += 1
-    elif pcr < 0.7:     bull_votes += 1
-
-    # 3. Static OI Support/Resistance
-    if spot_price > max_call_strike:    bull_votes += 1
-    elif spot_price < max_put_strike:   bear_votes += 1
-
-    # 4. Net OI Change
-    if net_call_change > net_put_change:    bull_votes += 1
-    elif net_put_change > net_call_change:  bear_votes += 1
-
-    # 5. Change OI strike levels
-    if max_call_change_strike and max_call_change_val > 0:
-        if spot_price < max_call_change_strike:   bear_votes += 1
-        else:                                      bull_votes += 1
-    if max_put_change_strike and max_put_change_val > 0:
-        if spot_price > max_put_change_strike:    bull_votes += 1
-        else:                                      bear_votes += 1
-
-    # 6. Macro Flow Score
-    if macro_flow_score is not None:
-        if macro_flow_score > 0.3:    bull_votes += 1
-        elif macro_flow_score < -0.3: bear_votes += 1
-
-    if bull_votes > bear_votes:      direction = "BULLISH"
-    elif bear_votes > bull_votes:    direction = "BEARISH"
-    else:                            direction = "NEUTRAL"
-
-    # Target / Stop
-    if direction == "BULLISH":
-        candidates = [t for t in [max_pain_strike, max_call_change_strike] if t is not None and t > spot_price]
-        target = max(candidates) if candidates else spot_price * 1.005
-        supports = [s for s in [max_put_strike, max_put_change_strike] if s is not None and s < spot_price]
-        stop_loss = max(supports) if supports else spot_price * 0.995
-    elif direction == "BEARISH":
-        candidates = [t for t in [max_pain_strike, max_put_change_strike] if t is not None and t < spot_price]
-        target = min(candidates) if candidates else spot_price * 0.995
-        resistances = [r for r in [max_call_strike, max_call_change_strike] if r is not None and r > spot_price]
-        stop_loss = min(resistances) if resistances else spot_price * 1.005
-    else:
-        target = (max_call_strike + max_put_strike) / 2
-        stop_loss = spot_price
-
-    # Confidence
-    oi_concentration = max(total_calls, total_puts) / (total_calls + total_puts + 1e-6)
-    pcr_extreme = abs(pcr - 1.0)
-    change_ratio = abs(net_call_change - net_put_change) / (total_calls + total_puts + 1e-6) if (total_calls + total_puts) > 0 else 0
-    macro_conf = abs(macro_flow_score) if macro_flow_score is not None else 0
-    confidence = min(100, 30 + 20 * oi_concentration + 20 * pcr_extreme + 15 * min(change_ratio, 1) + 15 * macro_conf)
-
-    return {
-        "direction": direction,
-        "target": round(target, 2),
-        "stop_loss": round(stop_loss, 2),
-        "confidence": round(confidence, 1),
-        "max_pain": round(max_pain_strike, 2),
-        "resistance": round(max_call_strike, 2),
-        "support": round(max_put_strike, 2),
-        "pcr": round(pcr, 2),
-        "bull_votes": bull_votes,
-        "bear_votes": bear_votes,
-        "net_call_change": net_call_change,
-        "net_put_change": net_put_change,
-        "macro_flow_score": macro_flow_score,
-        "max_call_change_strike": max_call_change_strike,
-        "max_put_change_strike": max_put_change_strike,
-    }
-
-# ==============================
-# OI FLOW FETCHING & PARSING (now returns dict instead of displaying)
-# ==============================
-def fetch_futures_data():
-    url = 'https://api.upstox.com/v2/market/smartlist/futures'
-    params = {
-        'asset_type': 'INDEX',
-        'category': 'TOP_TRADED',
-        'page_number': 1,
-        'page_size': 20,
-    }
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': access_token
-    }
-    response = requests.get(url, params=params, headers=headers)
-    return json.loads(response.text)
-
-def parse_futures_flow(data, title="OI Flow Details", key_prefix=None, key_contains=None):
-    smartlist = data['data']['smartlist']
-    if key_prefix:
-        smartlist = [item for item in smartlist if item["instrument_key"].startswith(key_prefix)]
-    if key_contains:
-        smartlist = [item for item in smartlist if key_contains in item["instrument_key"]]
-    rows = []
-    weighted_score = 0.0
-    total_value_weight = 0.0
-    for item in smartlist:
-        current_value = item['metric']['current']
-        if current_value < 100_000_000:  # Ignore tiny turnover
-            continue
-        price_change = item['price']['change_pct']
-        change_abs = item['metric']['change_abs']
-        change_pct = item['metric']['change_pct']
-        score = 0.0
-        if change_abs > 1_000_000_000 and price_change < -0.3:
-            score = -0.9
-        elif change_abs > 1_000_000_000 and price_change > 0.3:
-            score = 0.9
-        elif change_pct > 30 and price_change < -0.3:
-            score = -0.6
-        elif change_pct > 10 and price_change < -0.5:
-            score = -0.4
-        elif change_pct > 10 and price_change > 0.5:
-            score = 0.4
-        weight = current_value / 1_000_000_000
-        weighted_score += score * weight
-        total_value_weight += weight
-        rows.append({
-            "instrument_key": item["instrument_key"],
-            "score": score,
-            "weight": weight,
-            "current_value": current_value,
-            "price_change": price_change,
-            "change_abs": change_abs,
-            "change_pct": change_pct
-        })
-    if total_value_weight == 0:
-        final_score = 0.0
-    else:
-        final_score = weighted_score / total_value_weight
-    final_score = max(-1, min(1, final_score))
-    # Return dict instead of displaying directly
-    return {
-        "score": final_score,
-        "rows": rows,
-        "title": title,
-        "key_prefix": key_prefix
-    }
-
-# ==============================
-# FETCH ALL DATA (master symbols + OI Flow)
-# ==============================
-UPSTOX_INDEX_KEYS = {
-    "NIFTY 50":   "NSE_INDEX|Nifty 50",
-    "SENSEX":     "BSE_INDEX|SENSEX",
-    "BANK NIFTY": "NSE_INDEX|Nifty Bank",
-}
+UPSTOX_INDEX_KEYS = {"NIFTY 50": "NSE_INDEX|Nifty 50"}
 
 def fetch_upstox_index_quotes():
-    """Live index prices from Upstox. Returns {name: (prev_close, close, change_abs, pct)}."""
     out = {}
     try:
         r = requests.get(
@@ -1022,286 +511,228 @@ def fetch_upstox_index_quotes():
 
 upstox_index_quotes = fetch_upstox_index_quotes()
 
+def fetch_master_data(symbol_dict):
+    if symbol_dict["name"] in UPSTOX_INDEX_KEYS and symbol_dict["name"] in upstox_index_quotes:
+        return symbol_dict, upstox_index_quotes[symbol_dict["name"]]
+    payload = {
+        "symbols": {"tickers": [symbol_dict["tv_symbol"]], "query": {"types": []}},
+        "columns": ["close", "change", "change_abs"]
+    }
+    try:
+        r = SESSION.post(TV_URL, json=payload, headers=HEADERS, timeout=5)
+        r.raise_for_status()
+        d = r.json()["data"][0]["d"]
+        close, pct, change_abs = d[0], d[1], d[2]
+        prev_close = close - change_abs
+        return symbol_dict, (round(prev_close, 2), round(close, 2), round(change_abs, 2), round(pct, 2))
+    except Exception as e:
+        print(f"Error fetching {symbol_dict['name']}: {e}")
+        return symbol_dict, None
+
+def calculate_momentum_score(nifty_price, nifty_prev_close, lookback_minutes=15):
+    try:
+        change_pct = ((nifty_price - nifty_prev_close) / nifty_prev_close) * 100 if nifty_prev_close > 0 else 0
+        if change_pct < -0.5: return -2, "STRONG_BEARISH", change_pct
+        elif change_pct < -0.25: return -1, "BEARISH", change_pct
+        elif change_pct > 0.5: return 2, "STRONG_BULLISH", change_pct
+        elif change_pct > 0.25: return 1, "BULLISH", change_pct
+        else: return 0, "NEUTRAL", change_pct
+    except:
+        return 0, "NEUTRAL", 0
+
+def detect_domestic_pressure(nifty_change_pct, sgx_pct, gift_pct, nifty_price, nifty_prev_close):
+    pressure_score = 0
+    pressure_type = "ALIGNED"
+    reasons = []
+    if abs(sgx_pct) > 0.1 and abs(gift_pct) > 0.1:
+        avg_futures = (sgx_pct + gift_pct) / 2
+        if nifty_change_pct < -0.15 and avg_futures > 0:
+            divergence = abs(nifty_change_pct) / (abs(avg_futures) + 0.01)
+            if divergence > 1.5:
+                pressure_type = "HIGH_DOMESTIC_SELLING"
+                pressure_score = divergence * nifty_change_pct * -1
+                reasons.append(f"🔴 High domestic selling: Nifty {nifty_change_pct:+.2f}% vs futures {avg_futures:+.2f}%")
+            elif divergence > 0.8:
+                pressure_type = "MODERATE_DOMESTIC_SELLING"
+                pressure_score = divergence * nifty_change_pct * -1
+                reasons.append(f"🟡 Moderate domestic selling: divergence {divergence:.1f}x")
+    if nifty_price > 0 and nifty_prev_close > 0:
+        range_size = abs(nifty_price - nifty_prev_close) / nifty_prev_close * 100
+        if range_size > 0.5 and pressure_type == "ALIGNED":
+            if nifty_change_pct < -0.3:
+                pressure_type = "STRONG_DOWN_MOMENTUM"; pressure_score = abs(nifty_change_pct) * 2
+                reasons.append(f"🔴 Strong downward momentum: {nifty_change_pct:+.2f}%")
+            elif nifty_change_pct > 0.3:
+                pressure_type = "STRONG_UP_MOMENTUM"; pressure_score = abs(nifty_change_pct) * 2
+                reasons.append(f"✅ Strong upward momentum: {nifty_change_pct:+.2f}%")
+    return pressure_type, pressure_score, reasons
+
+def apply_domestic_override(sentiment_score, pressure_type, pressure_score, momentum_score):
+    if "SELLING" in pressure_type:
+        if sentiment_score > 0:
+            reduction = min(0.95, pressure_score * 0.15)
+            return sentiment_score * (1 - reduction), f"🛑 Domestic Selling Override: {reduction:.0%} reduction"
+        else:
+            amplification = min(1.5, 1 + pressure_score * 0.05)
+            return sentiment_score * amplification, f"⬇️ Bearish amplified: {amplification:.1f}x"
+    elif "MOMENTUM" in pressure_type:
+        if pressure_type == "STRONG_DOWN_MOMENTUM" and sentiment_score > 0:
+            reduction = min(0.9, 0.7 + abs(pressure_score) * 0.05)
+            return sentiment_score * (1 - reduction), f"📉 Down Momentum Override: {reduction:.0%} reduction"
+        elif pressure_type == "STRONG_UP_MOMENTUM" and sentiment_score < 0:
+            reduction = min(0.9, 0.7 + abs(pressure_score) * 0.05)
+            return sentiment_score * (1 - reduction), f"📈 Up Momentum Override: {reduction:.0%} reduction"
+    return sentiment_score, "No override"
+
+def fetch_futures_data():
+    url = 'https://api.upstox.com/v2/market/smartlist/futures'
+    params = {'asset_type': 'INDEX', 'category': 'TOP_TRADED', 'page_number': 1, 'page_size': 20}
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json',
+               'Authorization': access_token}
+    response = requests.get(url, params=params, headers=headers)
+    return json.loads(response.text)
+
+def parse_futures_flow(data, title="OI Flow Details", key_prefix=None, key_contains=None):
+    smartlist = data['data']['smartlist']
+    if key_prefix:
+        smartlist = [item for item in smartlist if item["instrument_key"].startswith(key_prefix)]
+    if key_contains:
+        smartlist = [item for item in smartlist if key_contains in item["instrument_key"]]
+    rows = []
+    weighted_score = 0.0
+    total_value_weight = 0.0
+    for item in smartlist:
+        current_value = item['metric']['current']
+        if current_value < 100_000_000:
+            continue
+        price_change = item['price']['change_pct']
+        change_abs = item['metric']['change_abs']
+        change_pct = item['metric']['change_pct']
+        score = 0.0
+        if change_abs > 1_000_000_000 and price_change < -0.3: score = -0.9
+        elif change_abs > 1_000_000_000 and price_change > 0.3: score = 0.9
+        elif change_pct > 30 and price_change < -0.3: score = -0.6
+        elif change_pct > 10 and price_change < -0.5: score = -0.4
+        elif change_pct > 10 and price_change > 0.5: score = 0.4
+        weight = current_value / 1_000_000_000
+        weighted_score += score * weight
+        total_value_weight += weight
+        rows.append({"instrument_key": item["instrument_key"], "score": score, "weight": weight,
+                     "current_value": current_value, "price_change": price_change,
+                     "change_abs": change_abs, "change_pct": change_pct})
+    final_score = 0.0 if total_value_weight == 0 else weighted_score / total_value_weight
+    final_score = max(-1, min(1, final_score))
+    return {"score": final_score, "rows": rows, "title": title, "key_prefix": key_prefix}
+
 with ThreadPoolExecutor(max_workers=len(master_symbols)) as executor:
     results = list(executor.map(fetch_master_data, master_symbols))
 
-# Parse master data
-final_display     = []
+final_display = []
 volatility_alerts = []
-weighted_pcts_c1  = []
+weighted_pcts_c1 = []
 sentiment_score_c1 = 0.0
-trigger_pcts_c2   = []
+trigger_pcts_c2 = []
 
 nifty_price = nifty_prev_close = 0.0
-sensex_price = sensex_prev_close = 0.0
-banknifty_price = banknifty_prev_close = 0.0
-vix_value   = 0.0
-usdinr_pct  = 0.0
-china_pct   = 0.0
-sgx_pct     = 0.0
-gift_pct    = 0.0
-hangseng_pct= 0.0
-sp500_pct   = 0.0
-nasdaq_pct  = 0.0
-topix_pct   = 0.0
-india_vix_value = 0.0
-india_vix_pct   = 0.0
+vix_value = 0.0; usdinr_pct = 0.0; china_pct = 0.0; sgx_pct = 0.0; gift_pct = 0.0
+hangseng_pct = 0.0; sp500_pct = 0.0; nasdaq_pct = 0.0; topix_pct = 0.0
+india_vix_value = 0.0; india_vix_pct = 0.0
 
 for s, res in results:
     if res:
         prev, close, change, pct = res
         final_display.append({"s": s, "close": close, "pct": pct, "abs": change, "prev": prev})
-        if s["name"] == "NIFTY 50":
-            nifty_price, nifty_prev_close = close, prev
-        elif s["name"] == "SENSEX":
-            sensex_price, sensex_prev_close = close, prev
-        elif s["name"] == "BANK NIFTY":
-            banknifty_price, banknifty_prev_close = close, prev
-        elif s["name"] == "VIX":
-            vix_value = close
-        elif s["name"] == "India VIX":
-            india_vix_value = close
-            india_vix_pct   = pct
-        elif s["name"] == "USD/INR":
-            usdinr_pct = pct
-        elif s["name"] == "CSI 300":
-            china_pct = pct
-        elif s["name"] == "BankNifty Fut":
-            sgx_pct = pct
-        elif s["name"] == "GIFT Nifty":
-            gift_pct = pct
-        elif s["name"] == "Hang Seng":
-            hangseng_pct = pct
-        elif s["name"] == "S&P 500":
-            sp500_pct = pct
-        elif s["name"] == "Nasdaq 100":
-            nasdaq_pct = pct
-        elif s["name"] == "TOPIX":
-            topix_pct = pct
+        if s["name"] == "NIFTY 50": nifty_price, nifty_prev_close = close, prev
+        elif s["name"] == "VIX": vix_value = close
+        elif s["name"] == "India VIX": india_vix_value = close; india_vix_pct = pct
+        elif s["name"] == "USD/INR": usdinr_pct = pct
+        elif s["name"] == "CSI 300": china_pct = pct
+        elif s["name"] == "BankNifty Fut": sgx_pct = pct
+        elif s["name"] == "GIFT Nifty": gift_pct = pct
+        elif s["name"] == "Hang Seng": hangseng_pct = pct
+        elif s["name"] == "S&P 500": sp500_pct = pct
+        elif s["name"] == "Nasdaq 100": nasdaq_pct = pct
+        elif s["name"] == "TOPIX": topix_pct = pct
         if s["w"] != 0:
-            sentiment_score_c1 += pct * s["w"]
-            weighted_pcts_c1.append(pct)
-        if s["trigger_alignment"]:
-            trigger_pcts_c2.append(pct)
-        if abs(pct) >= 2.0:
-            volatility_alerts.append(f"{s['icon']} {s['name']} moved {pct:+.2f}%")
+            sentiment_score_c1 += pct * s["w"]; weighted_pcts_c1.append(pct)
+        if s["trigger_alignment"]: trigger_pcts_c2.append(pct)
+        if abs(pct) >= 2.0: volatility_alerts.append(f"{s['icon']} {s['name']} moved {pct:+.2f}%")
     else:
         final_display.append({"s": s, "close": 0, "pct": 0, "abs": 0, "prev": 0})
 
-# OI Flow - fetch and store results (we'll display later in the desired order)
 fetched_data = fetch_futures_data()
 nifty_flow_result = parse_futures_flow(fetched_data, title="Nifty OI Flow Details", key_prefix="NSE_FO")
-sensex_flow_result = parse_futures_flow(fetched_data, title="Sensex OI Flow Details", key_prefix="BSE_FO")
-banknifty_flow_result = parse_futures_flow(fetched_data, title="BankNifty OI Flow Details", key_prefix="NSE_FO", key_contains="BANKNIFTY")
-
-# Store macro scores for Code 3
 nifty_macro_score = nifty_flow_result["score"]
-sensex_macro_score = sensex_flow_result["score"]
-banknifty_macro_score = banknifty_flow_result["score"]
 
 momentum_score, momentum_label, momentum_pct = calculate_momentum_score(
     nifty_price, nifty_prev_close, momentum_lookback)
 
-# ==============================
-# CODE 1 & 2 CALCULATIONS
-# ==============================
 nifty_change_pct = ((nifty_price - nifty_prev_close) / nifty_prev_close) * 100 if nifty_prev_close > 0 else 0
 nifty_actual_change = nifty_price - nifty_prev_close
 
 pressure_type, pressure_score, pressure_reasons = detect_domestic_pressure(
     nifty_change_pct, sgx_pct, gift_pct, nifty_price, nifty_prev_close)
 
-# ---- IMPROVED VIX LOGIC (US + India) ----
-vix_regime = "NORMAL"
-vix_dampener_val = 1.0
-vix_warning = ""
-
-# US VIX
+# VIX LOGIC
+vix_regime = "NORMAL"; vix_dampener_val = 1.0; vix_warning = ""
 us_vix_dampener = 1.0
 if vix_value > 0:
     if vix_value >= vix_threshold + 5:
-        us_vix_dampener = vix_dampener * 0.3
-        vix_regime = "EXTREME FEAR"
+        us_vix_dampener = vix_dampener * 0.3; vix_regime = "EXTREME FEAR"
         vix_warning = f"🔴 US VIX EXTREME: {vix_value:.1f}"
     elif vix_value >= vix_threshold:
-        us_vix_dampener = vix_dampener
-        vix_regime = "ELEVATED"
+        us_vix_dampener = vix_dampener; vix_regime = "ELEVATED"
         vix_warning = f"🟡 US VIX ELEVATED: {vix_value:.1f}"
-
-# India VIX
-india_vix_dampener = 1.0
-india_vix_regime = "NORMAL"
+india_vix_dampener = 1.0; india_vix_regime = "NORMAL"
 if india_vix_value > 0:
     if india_vix_value >= india_vix_threshold + 5:
-        india_vix_dampener = india_vix_dampener * 0.3
-        india_vix_regime = "EXTREME FEAR"
+        india_vix_dampener = india_vix_dampener * 0.3; india_vix_regime = "EXTREME FEAR"
         vix_warning += f" | 🔴 India VIX EXTREME: {india_vix_value:.1f}"
     elif india_vix_value >= india_vix_threshold:
-        india_vix_dampener = india_vix_dampener
-        india_vix_regime = "ELEVATED"
+        india_vix_dampener = india_vix_dampener; india_vix_regime = "ELEVATED"
         vix_warning += f" | 🟡 India VIX ELEVATED: {india_vix_value:.1f}"
-
-# Combine dampeners (take the more conservative, i.e., smaller)
 combined_dampener = min(us_vix_dampener, india_vix_dampener)
-
-# Build warning message if any
 if vix_warning:
     vix_warning = "⚠️ " + vix_warning + " — Bullish signals dampened."
 
 raw_sentiment = sentiment_score_c1
 if raw_sentiment > 0 and combined_dampener < 1.0:
     sentiment_score_c1 = raw_sentiment * combined_dampener
-
 sentiment_score_c1, override_note = apply_domestic_override(
     sentiment_score_c1, pressure_type, pressure_score, momentum_score)
 
-confidence = calculate_confidence_score(weighted_pcts_c1, vix_value, india_vix_value, nifty_change_pct, pressure_type)
-target_price_c1 = round(nifty_prev_close * (1 + (sentiment_score_c1 / 100)), 2) if nifty_prev_close > 0 else 0.0
-pred_change_c1 = round(target_price_c1 - nifty_prev_close, 2)
-pred_pct_c1 = round(sentiment_score_c1, 2)
-
-if sentiment_score_c1 > 0.5:   pred_text_c1 = "STRONG BULLISH 🚀"
-elif sentiment_score_c1 >= 0.1: pred_text_c1 = "SLIGHTLY BULLISH 📈"
-elif sentiment_score_c1 > -0.1: pred_text_c1 = "NEUTRAL ⚖️"
-elif sentiment_score_c1 >= -0.5: pred_text_c1 = "SLIGHTLY BEARISH 📉"
-else:                           pred_text_c1 = "STRONG BEARISH ⚠️"
-
-if "override" in override_note.lower() and "No override" not in override_note:
-    pred_text_c1 = f"{pred_text_c1} {override_note}"
-
-direction_c2, score_c2, bull_votes_c2, bear_votes_c2, reasons_c2 = compute_signal_score_enhanced(
-    trigger_pcts_c2, china_pct, sgx_pct, vix_value, usdinr_pct, hangseng_pct,
-    nifty_change_pct, pressure_type, momentum_label)
-
-signal_fires = (is_after_china and score_c2 >= min_signal_score)
-if not signal_fires and score_c2 >= min_signal_score - 1:
-    if "STRONG" in momentum_label and abs(nifty_change_pct) > 0.5:
-        signal_fires = True
-        reasons_c2.append("🚀 Momentum override activated signal")
-
-prediction_c2 = direction_c2 if signal_fires else "NEUTRAL"
-signal_strength = "STRONG" if score_c2 >= 5 else "MODERATE" if score_c2 >= 3 else "WEAK" if score_c2 >= 1 else "NONE"
-
-if nifty_prev_close > 0 and prediction_c2 != "NEUTRAL":
-    if "SELLING" in pressure_type:
-        china_weight, sgx_weight, momentum_weight = 0.3, 0.3, 0.4
-    elif "BUYING" in pressure_type:
-        china_weight, sgx_weight, momentum_weight = 0.3, 0.3, 0.4
-    else:
-        china_weight, sgx_weight, momentum_weight = 0.4, 0.4, 0.2
-    blended_pct = china_pct * china_weight + sgx_pct * sgx_weight + momentum_pct * momentum_weight
-    target_c2 = round(nifty_prev_close * (1 + blended_pct / 100), 2)
-    points_move_c2 = round(target_c2 - nifty_prev_close, 2)
-    display_move_pct_c2 = round(blended_pct, 2)
-else:
-    target_c2 = points_move_c2 = display_move_pct_c2 = 0.0
-
-if prediction_c2 == "BULLISH" and nifty_price > 0:
-    if momentum_label in ["STRONG_BULLISH", "BULLISH"]:
-        stop_loss_c2 = round(nifty_price * 0.997, 2)
-    else:
-        stop_loss_c2 = round(nifty_price * 0.995, 2)
-elif prediction_c2 == "BEARISH" and nifty_price > 0:
-    if momentum_label in ["STRONG_BEARISH", "BEARISH"]:
-        stop_loss_c2 = round(nifty_price * 1.003, 2)
-    else:
-        stop_loss_c2 = round(nifty_price * 1.005, 2)
-else:
-    stop_loss_c2 = 0.0
-
-if prediction_c2 == "BULLISH" and signal_strength == "STRONG":   card_class_c2 = "bullish"
-elif prediction_c2 == "BULLISH":                                   card_class_c2 = "weak-bullish"
-elif prediction_c2 == "BEARISH" and signal_strength == "STRONG": card_class_c2 = "bearish"
-elif prediction_c2 == "BEARISH":                                   card_class_c2 = "weak-bearish"
-else:                                                              card_class_c2 = "neutral"
-
-# ==============================
-# CODE 3 – OI prediction (Nifty)
-# ==============================
-change_oi_data = (upstoxOiChangeResponse.get("data") or {}).get("call_put_oi_data_list") if upstoxOiChangeResponse.get("status") == "success" else None
-oi_list_main = data.get("call_put_oi_data_list") if isinstance(data, dict) else None
-if oi_list_main:
-    oi_signal = compute_oi_signal(oi_list_main, nifty_price, change_oi_data, nifty_macro_score)
-else:
-    # Main OI data not available (market closed / not published yet) -> neutral fallback
-    oi_signal = {
-        "direction": "NEUTRAL",
-        "target": 0.0,
-        "stop_loss": 0.0,
-        "confidence": 0.0,
-        "max_pain": 0.0,
-        "resistance": 0.0,
-        "support": 0.0,
-        "pcr": 0.0,
-        "bull_votes": 0,
-        "bear_votes": 0,
-        "net_call_change": 0,
-        "net_put_change": 0,
-        "macro_flow_score": nifty_macro_score,
-        "max_call_change_strike": None,
-        "max_put_change_strike": None,
-    }
-
-# Determine OI card style
-if oi_signal["direction"] == "BULLISH":
-    oi_card_class = "bullish" if oi_signal["confidence"] > 70 else "weak-bullish"
-elif oi_signal["direction"] == "BEARISH":
-    oi_card_class = "bearish" if oi_signal["confidence"] > 70 else "weak-bearish"
-else:
-    oi_card_class = "neutral"
-
-# ==============================
 # DIVERGENCE
-# ==============================
-divergence_detected = False
-divergence_msg = ""
-divergence_level = "NONE"
+divergence_detected = False; divergence_msg = ""; divergence_level = "NONE"
 if nifty_price > 0 and nifty_prev_close > 0:
     if sentiment_score_c1 > 0.1 and nifty_change_pct < -0.15:
-        divergence_detected = True
-        divergence_level = "BULLISH_DIVERGENCE"
+        divergence_detected = True; divergence_level = "BULLISH_DIVERGENCE"
         divergence_msg = (f"⚠️ BULLISH DIVERGENCE: Global weights suggest upward drift "
                           f"(+{raw_sentiment:.2f}% raw → {sentiment_score_c1:+.2f}% adjusted), "
                           f"but Nifty Spot is sliding ({nifty_change_pct:+.2f}% / {nifty_actual_change:+.2f} pts).")
     elif sentiment_score_c1 < -0.1 and nifty_change_pct > 0.15:
-        divergence_detected = True
-        divergence_level = "BEARISH_DIVERGENCE"
+        divergence_detected = True; divergence_level = "BEARISH_DIVERGENCE"
         divergence_msg = (f"⚠️ BEARISH DIVERGENCE: Global weights negative "
                           f"({raw_sentiment:.2f}% → {sentiment_score_c1:+.2f}%), "
                           f"but Nifty Spot is squeezing up ({nifty_change_pct:+.2f}% / {nifty_actual_change:+.2f} pts).")
 
 # ==============================
-# Code 4 & 5 – OI Change Entry/Exit (Nifty & Sensex)
+# CODE 1 — entry/exit/gate functions (unchanged)
 # ==============================
-
-# --- Helper functions (generic for any index) ---
 def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_points=27, greeks_by_strike=None, max_candidates=5):
-    """
-    Returns a dict with entry signal. Ranks the top `max_candidates` strikes by OI
-    difference, then prefers the highest-ranked one whose Delta falls in a relevant
-    band (0.15-0.75) — filtering out strikes whose OI build-up is too far OTM/ITM
-    to actually influence spot price. Falls back to the top OI-diff strike if none
-    of the candidates pass the Delta filter (or if Greeks data isn't available).
-    """
     if not change_oi_response or change_oi_response.get("status") != "success":
         return None
     data = change_oi_response.get("data") or {}
     items = data.get("call_put_oi_data_list") or []
     if not items:
         return None
-
     ranked = []
     for item in items:
         call_oi = item.get("call_change_oi", item.get("call_oi", 0))
         put_oi = item.get("put_change_oi", item.get("put_oi", 0))
         ranked.append((abs(put_oi - call_oi), item, call_oi, put_oi))
     ranked.sort(key=lambda x: x[0], reverse=True)
-
-    best_item = None
-    best_diff = -1
-    best_call_oi = best_put_oi = 0
+    best_item = None; best_diff = -1; best_call_oi = best_put_oi = 0
     best_conf, best_delta_ok, best_notes = 40.0, True, []
-
     for diff, item, call_oi, put_oi in ranked[:max_candidates]:
         high_type = "HIGH PUT" if put_oi > call_oi else "HIGH CALL"
         strike = item["strike_price"]
@@ -1313,76 +744,42 @@ def get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_point
             best_conf, best_delta_ok, best_notes = conf, delta_ok, notes
             break
         elif best_item is None:
-            # Keep the top OI-diff candidate as a fallback in case nothing passes the filter
             best_item, best_diff = item, diff
             best_call_oi, best_put_oi = call_oi, put_oi
             best_conf, best_delta_ok, best_notes = conf, delta_ok, notes
-
-    if best_item is None:
-        return None
-
+    if best_item is None: return None
     strike = best_item["strike_price"]
     high_type = "HIGH PUT" if best_put_oi > best_call_oi else "HIGH CALL"
-
     if high_type == "HIGH PUT":
-        trigger_price = strike + buffer_points
-        signal = "BUY"
+        trigger_price = strike + buffer_points; signal = "BUY"
         reason = f"Support at {strike} (Put OI > Call OI). Trigger at {trigger_price}"
     else:
-        trigger_price = strike - buffer_points
-        signal = "SELL"
+        trigger_price = strike - buffer_points; signal = "SELL"
         reason = f"Resistance at {strike} (Call OI > Put OI). Trigger at {trigger_price}"
-
     active = False
-    if signal == "BUY" and spot_price >= trigger_price:
-        active = True
-    elif signal == "SELL" and spot_price <= trigger_price:
-        active = True
-
-    # --- Strike quality + stop-loss (used by the entry confirmation gate) ---
+    if signal == "BUY" and spot_price >= trigger_price: active = True
+    elif signal == "SELL" and spot_price <= trigger_price: active = True
     _others = [r[0] for r in ranked if r[1] is not best_item]
     _second = _others[0] if _others else 0
     dominance = (best_diff / _second) if _second > 0 else 99.0
     stop_loss = (strike - gate_sl_buffer) if signal == "BUY" else (strike + gate_sl_buffer)
     reason = f"{reason} | SL {stop_loss:,.0f}"
-
-    return {
-        "strike": strike,
-        "high_type": high_type,
-        "signal": signal,
-        "trigger_price": trigger_price,
-        "active": active,
-        "reason": reason,
-        "call_oi": best_call_oi,
-        "put_oi": best_put_oi,
-        "oi_diff": best_diff,
-        "dominance": dominance,
-        "stop_loss": stop_loss,
-        "greeks": greeks_by_strike.get(strike) if greeks_by_strike else None,
-        "greeks_confidence": best_conf,
-        "delta_ok": best_delta_ok,
-        "greeks_notes": best_notes,
-    }
+    return {"strike": strike, "high_type": high_type, "signal": signal,
+            "trigger_price": trigger_price, "active": active, "reason": reason,
+            "call_oi": best_call_oi, "put_oi": best_put_oi, "oi_diff": best_diff,
+            "dominance": dominance, "stop_loss": stop_loss,
+            "greeks": greeks_by_strike.get(strike) if greeks_by_strike else None,
+            "greeks_confidence": best_conf, "delta_ok": best_delta_ok,
+            "greeks_notes": best_notes}
 
 def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal, buffer_points=27, min_gap=100, greeks_by_strike=None):
-    """
-    Returns exit signal details based on the opposite OI change high type,
-    but only if the distance between entry trigger and exit trigger >= min_gap.
-    """
     if not change_oi_response or change_oi_response.get("status") != "success":
         return None
     data = change_oi_response.get("data") or {}
     items = data.get("call_put_oi_data_list") or []
-    if not items:
-        return None
-
-    if entry_signal["signal"] == "BUY":
-        opposite_high_type = "HIGH CALL"
-    else:
-        opposite_high_type = "HIGH PUT"
-
-    best_item = None
-    best_diff = -1
+    if not items: return None
+    opposite_high_type = "HIGH CALL" if entry_signal["signal"] == "BUY" else "HIGH PUT"
+    best_item = None; best_diff = -1
     for item in items:
         call_oi = item.get("call_change_oi", item.get("call_oi", 0))
         put_oi = item.get("put_change_oi", item.get("put_oi", 0))
@@ -1390,77 +787,37 @@ def get_exit_signal_from_change_oi(change_oi_response, spot_price, entry_signal,
         if high_type == opposite_high_type:
             diff = abs(put_oi - call_oi)
             if diff > best_diff:
-                best_diff = diff
-                best_item = item
-
-    if best_item is None:
-        return None
-
+                best_diff = diff; best_item = item
+    if best_item is None: return None
     strike = best_item["strike_price"]
     call_oi = best_item.get("call_change_oi", best_item.get("call_oi", 0))
     put_oi = best_item.get("put_change_oi", best_item.get("put_oi", 0))
-
     if opposite_high_type == "HIGH PUT":
-        trigger_price = strike + buffer_points
-        exit_signal_type = "BUY"
+        trigger_price = strike + buffer_points; exit_signal_type = "BUY"
     else:
-        trigger_price = strike - buffer_points
-        exit_signal_type = "SELL"
-
-    entry_trigger = entry_signal["trigger_price"]
-    if abs(entry_trigger - trigger_price) < min_gap:
+        trigger_price = strike - buffer_points; exit_signal_type = "SELL"
+    if abs(entry_signal["trigger_price"] - trigger_price) < min_gap:
         return None
+    active = spot_price >= trigger_price if entry_signal["signal"] == "BUY" else spot_price <= trigger_price
+    reason = f"Exit {'BUY' if opposite_high_type=='HIGH PUT' else 'SELL'} signal: " \
+             f"{'Support' if opposite_high_type=='HIGH PUT' else 'Resistance'} at {strike}. Trigger at {trigger_price}"
+    return {"strike": strike, "high_type": opposite_high_type, "signal": exit_signal_type,
+            "trigger_price": trigger_price, "active": active, "reason": reason,
+            "call_oi": call_oi, "put_oi": put_oi, "oi_diff": best_diff,
+            "greeks": greeks_by_strike.get(strike) if greeks_by_strike else None}
 
-    # Target reached: BUY entry -> target is above (hit when spot rises to it); SELL entry -> target below.
-    if entry_signal["signal"] == "BUY":
-        active = spot_price >= trigger_price
-    else:
-        active = spot_price <= trigger_price
-
-    if opposite_high_type == "HIGH PUT":
-        reason = f"Exit BUY signal: Support at {strike} (Put OI > Call OI). Trigger at {trigger_price}"
-    else:
-        reason = f"Exit SELL signal: Resistance at {strike} (Call OI > Put OI). Trigger at {trigger_price}"
-
-    return {
-        "strike": strike,
-        "high_type": opposite_high_type,
-        "signal": exit_signal_type,
-        "trigger_price": trigger_price,
-        "active": active,
-        "reason": reason,
-        "call_oi": call_oi,
-        "put_oi": put_oi,
-        "oi_diff": best_diff,
-        "greeks": greeks_by_strike.get(strike) if greeks_by_strike else None,
-    }
-
-# ==============================
-# COMPUTE NIFTY SIGNALS (Code 4)
-# ==============================
-# ===== GATE START =====
-# ==============================
-# ENTRY CONFIRMATION GATE
-# Hold-time + price confirmation + futures agreement + strike quality + time window,
-# then LOCK the signal so OI re-ranking can't flip it until the stop-loss is hit.
-# ==============================
 def _fmt_t(dt_obj):
     return dt_obj.strftime("%H:%M:%S") if dt_obj else "—"
 
 def _in_trade_window(now_dt, allow_opening=False):
-    if now_dt.weekday() >= 5:
-        return False, "Weekend — market closed"
+    if now_dt.weekday() >= 5: return False, "Weekend — market closed"
     t = now_dt.time()
-    if t < time(9, 15) or t > time(15, 30):
-        return False, "Market closed"
-    if not gate_time_filter:
-        return True, "Market open (time filter off)"
+    if t < time(9, 15) or t > time(15, 30): return False, "Market closed"
+    if not gate_time_filter: return True, "Market open (time filter off)"
     if t < time(9, 30):
-        if allow_opening:
-            return True, "Opening 15 min allowed — confirmed OI flip"
+        if allow_opening: return True, "Opening 15 min allowed — confirmed OI flip"
         return False, "Opening 15 min — wait for liquidity to settle"
-    if t > time(15, 0):
-        return False, "Last 30 min — avoid late entries"
+    if t > time(15, 0): return False, "Last 30 min — avoid late entries"
     return True, "Inside preferred trading window (09:30–15:00)"
 
 def _beyond_trigger(sig, trig, spot):
@@ -1478,8 +835,6 @@ def apply_signal_gate(index_name, entry, spot_price, macro_score, flip=None):
         state = {"date": today_key, "cand_dir": None, "cand_since": None,
                  "cross_since": None, "locked": None, "event": ""}
     status = {"verdict": "NONE", "checks": [], "time_label": "—", "warning": "", "event": state.get("event", "")}
-
-    # Futures-score history (last 15 min) to show whether flow is strengthening or fading
     hist_key = f"gate_hist_{index_name}"
     hist = st.session_state.get(hist_key, [])
     hist.append((now_dt, macro_score))
@@ -1487,11 +842,8 @@ def apply_signal_gate(index_name, entry, spot_price, macro_score, flip=None):
     st.session_state[hist_key] = hist
     ref = next((sc for t, sc in hist if (now_dt - t).total_seconds() <= 300), None)
     trend_txt = f", {macro_score - ref:+.2f} vs ~5 min ago" if (ref is not None and len(hist) > 1) else ""
-
     flip_dir = (flip or {}).get("flip")
     flip_sig = {"BULLISH": "BUY", "BEARISH": "SELL"}.get(flip_dir)
-
-    # ---- A. Already locked: hold it, only watch the stop-loss (or a confirmed opposite OI flip) ----
     locked = state.get("locked")
     if locked:
         sig = locked["signal"]
@@ -1521,26 +873,20 @@ def apply_signal_gate(index_name, entry, spot_price, macro_score, flip=None):
                                      f"opposite to your locked {sig}. Review your risk.")
             st.session_state[key] = state
             return out, status
-
-    # ---- B. Not locked: evaluate the candidate ----
     if not entry:
         state.update({"cand_dir": None, "cand_since": None, "cross_since": None})
         status["event"] = state.get("event", "")
         st.session_state[key] = state
         return None, status
-
     sig = entry["signal"]
     if state["cand_dir"] != sig:
         state.update({"cand_dir": sig, "cand_since": now_dt, "cross_since": None})
     if _beyond_trigger(sig, entry["trigger_price"], spot_price):
-        if state["cross_since"] is None:
-            state["cross_since"] = now_dt
+        if state["cross_since"] is None: state["cross_since"] = now_dt
     else:
         state["cross_since"] = None
-
     held_s = (now_dt - state["cand_since"]).total_seconds()
     cross_s = (now_dt - state["cross_since"]).total_seconds() if state["cross_since"] else 0.0
-
     checks = []
     flip_ok = bool(gate_flip_override and flip_sig and flip_sig == sig)
     held_ok = held_s >= gate_hold_min * 60
@@ -1563,27 +909,21 @@ def apply_signal_gate(index_name, entry, spot_price, macro_score, flip=None):
                                         f"({'agrees with' if flip_sig == sig else 'CONFLICTS with'} {sig} signal)"))
     win_ok, win_txt = _in_trade_window(now_dt, allow_opening=flip_ok)
     checks.append((win_ok, win_txt))
-
     passed = sum(1 for ok, _ in checks if ok)
     status["checks"] = checks
-
     if passed == len(checks):
-        locked_entry = dict(entry)
-        locked_entry["confirmed_at"] = now_dt
+        locked_entry = dict(entry); locked_entry["confirmed_at"] = now_dt
         state["locked"] = locked_entry
         state["event"] = f"✅ {sig} confirmed at {_fmt_t(now_dt)} (spot {spot_price:,.2f}) — signal locked"
-        out = dict(locked_entry)
-        out["active"] = True
+        out = dict(locked_entry); out["active"] = True
         out["status_label"] = "🔒 CONFIRMED & ACTIVE"
         status.update({"verdict": "CONFIRMED", "time_label": f"Locked {_fmt_t(now_dt)}", "event": state["event"]})
     else:
-        out = dict(entry)
-        out["active"] = False
+        out = dict(entry); out["active"] = False
         out["status_label"] = f"⏳ WAITING — {passed}/{len(checks)} checks passed"
         out["reason"] = f"{out['reason']} | NOT CONFIRMED"
         status.update({"verdict": "WAITING", "time_label": f"First seen {_fmt_t(state['cand_since'])}",
                        "event": state.get("event", "")})
-
     st.session_state[key] = state
     return out, status
 
@@ -1591,35 +931,26 @@ def render_gate_panel(gate, label):
     verdict = gate.get("verdict", "NONE")
     if verdict == "NONE":
         st.caption(f"🛡️ {label} entry gate: no raw OI signal right now.")
-        if gate.get("event"):
-            st.caption(gate["event"])
+        if gate.get("event"): st.caption(gate["event"])
         return
     color = {"CONFIRMED": "#2e7d32", "LOCKED": "#2e7d32", "WAITING": "#f9a825"}.get(verdict, "#6e7781")
     title = {"CONFIRMED": "✅ CONFIRMED — signal locked", "LOCKED": "🔒 LOCKED SIGNAL",
              "WAITING": "⏳ WAITING FOR CONFIRMATION"}.get(verdict, verdict)
     rows = "".join(f"<div>{'✅' if ok else '❌'} {txt}</div>" for ok, txt in gate["checks"])
     extra = ""
-    if gate.get("warning"):
-        extra += f'<div style="margin-top:6px; color:#c62828;"><b>⚠️ {gate["warning"]}</b></div>'
-    if gate.get("event"):
-        extra += f'<div style="margin-top:6px; font-size:0.85rem;">{gate["event"]}</div>'
+    if gate.get("warning"): extra += f'<div style="margin-top:6px; color:#c62828;"><b>⚠️ {gate["warning"]}</b></div>'
+    if gate.get("event"): extra += f'<div style="margin-top:6px; font-size:0.85rem;">{gate["event"]}</div>'
     html = (f'<div class="greeks-panel" style="border-left-color: {color};">'
             f'<b>🛡️ {label} Entry Gate — {title}</b>'
             f'<div style="margin-top:6px; font-size:0.9rem;">{rows}</div>{extra}</div>')
     st.markdown(html, unsafe_allow_html=True)
 
 # ==============================
-# OI FLIP METER
-# Gamma-weighted (Put change-in-OI minus Call change-in-OI) for strikes around LIVE spot.
-# Positive = put writing / call unwinding (support building, bullish)
-# Negative = call writing / put unwinding (resistance building, bearish)
-# A FLIP = score was beyond one threshold, then sustainably moves beyond the other within the look-back.
+# OI FLIP METER (unchanged)
 # ==============================
 def _fv(v, spec):
-    try:
-        return format(v, spec)
-    except Exception:
-        return "—"
+    try: return format(v, spec)
+    except Exception: return "—"
 
 def compute_oi_flip_meter(index_name, change_oi_response, spot_price, greeks_by_strike):
     now_dt = datetime.now(ist)
@@ -1632,7 +963,6 @@ def compute_oi_flip_meter(index_name, change_oi_response, spot_price, greeks_by_
     if not items:
         res["msg"] = "change-in-OI data not available (market closed or not yet published)."
         return res
-
     rows = sorted(items, key=lambda x: x["strike_price"])
     strikes = [r["strike_price"] for r in rows]
     atm_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot_price))
@@ -1640,7 +970,6 @@ def compute_oi_flip_meter(index_name, change_oi_response, spot_price, greeks_by_
     hi = min(len(rows), atm_idx + meter_window_strikes + 1)
     window = rows[lo:hi]
     greeks_by_strike = greeks_by_strike or {}
-
     use_gamma = any(((greeks_by_strike.get(r["strike_price"]) or {}).get("call_gamma") or
                      (greeks_by_strike.get(r["strike_price"]) or {}).get("put_gamma")) for r in window)
     P = C = 0.0
@@ -1648,26 +977,20 @@ def compute_oi_flip_meter(index_name, change_oi_response, spot_price, greeks_by_
         g = greeks_by_strike.get(r["strike_price"]) or {}
         dist = abs((lo + i) - atm_idx)
         if use_gamma:
-            wc = g.get("call_gamma") or 0
-            wp = g.get("put_gamma") or 0
+            wc = g.get("call_gamma") or 0; wp = g.get("put_gamma") or 0
         else:
             wc = wp = 1.0 / (1 + dist)
         ccoi = r.get("call_change_oi", r.get("call_oi", 0)) or 0
         pcoi = r.get("put_change_oi", r.get("put_oi", 0)) or 0
-        P += pcoi * wp
-        C += ccoi * wc
+        P += pcoi * wp; C += ccoi * wc
     denom = abs(P) + abs(C)
     score = ((P - C) / denom * 100.0) if denom > 0 else 0.0
-
-    # ---- history + flip detection ----
     hist_key = f"meter_hist_{index_name}"
     hist = st.session_state.get(hist_key, [])
     hist.append((now_dt, score))
     hist = [h for h in hist if (now_dt - h[0]).total_seconds() <= 5400]
     st.session_state[hist_key] = hist
-
-    thr = meter_flip_threshold
-    confirm_n = 3
+    thr = meter_flip_threshold; confirm_n = 3
     recent = [sc for _, sc in hist[-confirm_n:]]
     older = [sc for t, sc in hist[:-confirm_n] if (now_dt - t).total_seconds() <= meter_flip_lookback * 60]
     new_flip, from_val = None, None
@@ -1676,28 +999,21 @@ def compute_oi_flip_meter(index_name, change_oi_response, spot_price, greeks_by_
             new_flip, from_val = "BULLISH", min(older)
         elif all(sc <= -thr for sc in recent) and any(sc >= thr for sc in older):
             new_flip, from_val = "BEARISH", max(older)
-
     fkey = f"gate_state_flip_{index_name}"
     fstate = st.session_state.get(fkey)
     if fstate:
         age = (now_dt - fstate["since"]).total_seconds()
         crossed_back = (fstate["dir"] == "BULLISH" and score < 0) or (fstate["dir"] == "BEARISH" and score > 0)
-        if age > meter_flip_lookback * 60 or crossed_back:
-            fstate = None
+        if age > meter_flip_lookback * 60 or crossed_back: fstate = None
     if new_flip and (not fstate or fstate["dir"] != new_flip):
         fstate = {"dir": new_flip, "since": now_dt, "from": from_val}
     st.session_state[fkey] = fstate
-
     if fstate:
         res["flip"], res["flip_since"], res["flip_from"] = fstate["dir"], fstate["since"], fstate.get("from")
         res["state"] = f"🔄 {fstate['dir']} FLIP"
-    elif score >= thr:
-        res["state"] = "BULLISH"
-    elif score <= -thr:
-        res["state"] = "BEARISH"
-    else:
-        res["state"] = "NEUTRAL"
-
+    elif score >= thr: res["state"] = "BULLISH"
+    elif score <= -thr: res["state"] = "BEARISH"
+    else: res["state"] = "NEUTRAL"
     g = greeks_by_strike.get(strikes[atm_idx]) or {}
     cg, pg = g.get("call_iv"), g.get("put_iv")
     res.update({"available": True, "score": score, "n_strikes": len(window),
@@ -1715,18 +1031,15 @@ def render_oi_meter(meter, label, spot_price):
     if not meter.get("available"):
         st.caption(f"🧭 {label} OI Flip Meter: {meter.get('msg', 'no data')}")
         return
-    score = meter["score"]
-    thr = meter_flip_threshold
+    score = meter["score"]; thr = meter_flip_threshold
     color = "#2e7d32" if score >= thr else ("#c62828" if score <= -thr else "#f9a825")
     pos = max(0.0, min(100.0, (score + 100) / 2))
     atm = meter["atm"]
-
     flip_html = ""
     if meter.get("flip"):
         arrow = "🟢" if meter["flip"] == "BULLISH" else "🔴"
         flip_html = (f'<div style="margin-top:8px; font-weight:bold;">{arrow} {meter["flip"]} FLIP — OI bias swung from '
                      f'{_fv(meter.get("flip_from"), "+.0f")} to {score:+.0f} (detected {_fmt_t(meter.get("flip_since"))})</div>')
-
     spark = ""
     hist = meter.get("history", [])
     if len(hist) >= 2:
@@ -1736,7 +1049,6 @@ def render_oi_meter(meter, label, spot_price):
                  f'<line x1="0" y1="{H / 2}" x2="{W}" y2="{H / 2}" stroke="#bbb" stroke-dasharray="3,3"/>'
                  f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/></svg>'
                  f'<span style="font-size:0.75rem; color:#555; margin-left:8px;">score history (since app opened)</span>')
-
     items = [
         ("Δ Call/Put", f"{_fv(atm['call_delta'], '.2f')} / {_fv(atm['put_delta'], '.2f')}"),
         ("Γ Gamma", _fv(atm["gamma"], ".5f")),
@@ -1746,7 +1058,6 @@ def render_oi_meter(meter, label, spot_price):
         ("IV skew (P−C)", _fv(atm["skew"], "+.2f")),
     ]
     greeks_html = "".join(f'<span style="margin-right:18px;">{k}: <b>{v}</b></span>' for k, v in items)
-
     html = (
         f'<div class="greeks-panel" style="border-left-color: {color};">'
         f'<b>🧭 {label} OI Flip Meter</b> &nbsp;|&nbsp; <b>{meter["state"]}</b> &nbsp;|&nbsp; '
@@ -1766,61 +1077,38 @@ def render_oi_meter(meter, label, spot_price):
     st.markdown(html, unsafe_allow_html=True)
 
 def process_index_signals(index_name, change_oi_response, spot_price, greeks, macro_score, flip=None):
-    entry = None
-    exit_sig = None
+    entry = None; exit_sig = None
     if spot_price > 0 and change_oi_response.get("status") == "success":
         entry = get_entry_signal_from_change_oi(change_oi_response, spot_price, buffer_points=27, greeks_by_strike=greeks)
     if entry:
         exit_sig = get_exit_signal_from_change_oi(change_oi_response, spot_price, entry, buffer_points=27, min_gap=100, greeks_by_strike=greeks)
-        if exit_sig is None:
-            entry = None
+        if exit_sig is None: entry = None
     entry, gate = apply_signal_gate(index_name, entry, spot_price, macro_score, flip) if spot_price > 0 else (None, {"verdict": "NONE", "checks": [], "time_label": "—", "warning": "", "event": ""})
-    # A locked entry may differ from the live one -> recompute its exit target against the locked entry
     if entry and gate.get("verdict") == "LOCKED" and change_oi_response.get("status") == "success":
         exit_sig = get_exit_signal_from_change_oi(change_oi_response, spot_price, entry, buffer_points=27, min_gap=100, greeks_by_strike=greeks)
-    if not entry:
-        exit_sig = None
+    if not entry: exit_sig = None
     return entry, exit_sig, gate
-# ===== GATE END =====
 
 nifty_meter = compute_oi_flip_meter("Nifty", upstoxOiChangeResponse, nifty_price, nifty_greeks_by_strike)
-nifty_entry_signal, nifty_exit_signal, nifty_gate = process_index_signals("Nifty", upstoxOiChangeResponse, nifty_price, nifty_greeks_by_strike, nifty_macro_score, nifty_meter)
+nifty_entry_signal, nifty_exit_signal, nifty_gate = process_index_signals(
+    "Nifty", upstoxOiChangeResponse, nifty_price, nifty_greeks_by_strike, nifty_macro_score, nifty_meter)
 
-# ==============================
-# COMPUTE SENSEX SIGNALS (Code 5)
-# ==============================
-sensex_meter = compute_oi_flip_meter("Sensex", upstoxSensexOiChangeResponse, sensex_price, sensex_greeks_by_strike)
-sensex_entry_signal, sensex_exit_signal, sensex_gate = process_index_signals("Sensex", upstoxSensexOiChangeResponse, sensex_price, sensex_greeks_by_strike, sensex_macro_score, sensex_meter)
-
-# ==============================
-# COMPUTE BANKNIFTY SIGNALS (Code 6)
-# ==============================
-banknifty_meter = compute_oi_flip_meter("BankNifty", upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_greeks_by_strike)
-banknifty_entry_signal, banknifty_exit_signal, banknifty_gate = process_index_signals("BankNifty", upstoxBankNiftyOiChangeResponse, banknifty_price, banknifty_greeks_by_strike, banknifty_macro_score, banknifty_meter)
-
-# ==============================
-# TIMESTAMP
-# ==============================
 updated_datetime = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 entry_datetime = updated_datetime
 
 def render_greeks_panel(signal_data, label):
-    """Small panel showing Delta/Gamma/Theta/Vega/IV for a Code 4/5 signal's key strike."""
     if not signal_data or not signal_data.get("greeks"):
         st.caption(f"ℹ️ No Greeks data for {label} key strike.")
         return
-    g = signal_data["greeks"]
-    high_type = signal_data["high_type"]
+    g = signal_data["greeks"]; high_type = signal_data["high_type"]
     conf = signal_data.get("greeks_confidence", 0)
     if high_type == "HIGH PUT":
         delta, gamma, theta, vega, iv, leg = g["put_delta"], g["put_gamma"], g["put_theta"], g["put_vega"], g["put_iv"], "PUT"
     else:
         delta, gamma, theta, vega, iv, leg = g["call_delta"], g["call_gamma"], g["call_theta"], g["call_vega"], g["call_iv"], "CALL"
-
     color = "#2e7d32" if conf >= 60 else "#f9a825" if conf >= 35 else "#c62828"
     badge_class = "badge-pass" if signal_data.get("delta_ok", True) else "badge-weak"
     badge_text = "✅ PASSES DELTA FILTER" if signal_data.get("delta_ok", True) else "⚠️ WEAK — OUTSIDE DELTA BAND"
-
     st.markdown(f"""
     <div class="greeks-panel" style="border-left-color: {color};">
         <b>{leg} Greeks @ {signal_data['strike']}</b> &nbsp;|&nbsp; <span class="{badge_class}">{badge_text}</span>
@@ -1834,453 +1122,541 @@ def render_greeks_panel(signal_data, label):
         </div>
     </div>
     """, unsafe_allow_html=True)
-    for n in signal_data.get("greeks_notes", []):
-        st.caption(n)
+    for n in signal_data.get("greeks_notes", []): st.caption(n)
+
+# ==========================================================
+# ============ CHANGE-IN-OI REVERSAL METER (NEW) ============
+# ==========================================================
+def _fmt_oi_units(v, signed=True):
+    try: v = float(v)
+    except Exception: return "—"
+    a = abs(v)
+    sign = "+" if (signed and v > 0) else ("−" if v < 0 else "")
+    if a >= 1e7: return f"{sign}{a/1e7:.2f} Cr"
+    if a >= 1e5: return f"{sign}{a/1e5:.2f} L"
+    if a >= 1e3: return f"{sign}{a/1e3:.1f} K"
+    return f"{sign}{a:.0f}"
+
+def _rev_change_oi_hash(resp):
+    if not resp or resp.get("status") != "success": return None
+    items = (resp.get("data") or {}).get("call_put_oi_data_list") or []
+    if not items: return None
+    parts = []
+    for it in sorted(items, key=lambda x: x.get("strike_price", 0)):
+        parts.append((it.get("strike_price"),
+                      round(float(it.get("call_change_oi", 0) or 0), 2),
+                      round(float(it.get("put_change_oi", 0) or 0), 2)))
+    return hash(tuple(parts))
+
+def _rev_aggregate_change_oi(resp, spot_price, window_strikes):
+    out = {"available": False, "ce": 0.0, "pe": 0.0, "atm": None,
+           "n": 0, "ce_by_strike": {}, "pe_by_strike": {}}
+    if not resp or resp.get("status") != "success": return out
+    items = (resp.get("data") or {}).get("call_put_oi_data_list") or []
+    if not items: return out
+    rows = sorted(items, key=lambda x: x.get("strike_price", 0))
+    strikes = [r.get("strike_price", 0) for r in rows]
+    if spot_price > 0:
+        atm_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot_price))
+        lo = max(0, atm_idx - window_strikes); hi = min(len(rows), atm_idx + window_strikes + 1)
+        out["atm"] = strikes[atm_idx]
+    else:
+        lo, hi = 0, len(rows)
+    for r in rows[lo:hi]:
+        s = r.get("strike_price")
+        ce = float(r.get("call_change_oi", r.get("call_oi", 0)) or 0)
+        pe = float(r.get("put_change_oi", r.get("put_oi", 0)) or 0)
+        out["ce_by_strike"][s] = ce; out["pe_by_strike"][s] = pe
+        out["ce"] += ce; out["pe"] += pe
+    out["n"] = hi - lo; out["available"] = out["n"] > 0
+    return out
+
+def _rev_compute_pcr(oi_resp):
+    if not oi_resp or oi_resp.get("status") != "success": return None
+    items = (oi_resp.get("data") or {}).get("call_put_oi_data_list") or []
+    tp = sum(float(it.get("put_oi", 0) or 0) for it in items)
+    tc = sum(float(it.get("call_oi", 0) or 0) for it in items)
+    if tc <= 0: return None
+    return tp / tc
+
+def _rev_capture_snapshot(change_oi_resp, oi_resp, spot_price, window_strikes):
+    agg = _rev_aggregate_change_oi(change_oi_resp, spot_price, window_strikes)
+    if not agg["available"]: return None
+    return {"ts": datetime.now(ist), "ce": agg["ce"], "pe": agg["pe"],
+            "imb": agg["ce"] - agg["pe"],
+            "spot": float(spot_price) if spot_price else 0.0,
+            "atm": agg["atm"], "n": agg["n"],
+            "pcr": _rev_compute_pcr(oi_resp),
+            "hash": _rev_change_oi_hash(change_oi_resp)}
+
+def _rev_add_snapshot(snap, max_keep=3000):
+    if not snap: return
+    hist = st.session_state.get("rev_snapshots", [])
+    if hist and hist[-1].get("hash") == snap.get("hash"): return
+    hist.append(snap)
+    if len(hist) > max_keep: hist = hist[-max_keep:]
+    st.session_state.rev_snapshots = hist
+
+def _rev_find_at(history, current_ts, seconds_ago):
+    if not history: return None
+    target = current_ts - dt_mod.timedelta(seconds=seconds_ago)
+    best, best_d = None, None
+    for s in history:
+        d = abs((s["ts"] - target).total_seconds())
+        if best_d is None or d < best_d: best, best_d = s, d
+    if best and best_d is not None and best_d <= max(15, seconds_ago * 0.5): return best
+    return None
+
+def _rev_baseline(history, field, lookback, exclude_last=1):
+    if not history or len(history) < lookback + exclude_last: return None, None
+    vals = [s[field] for s in history[-(lookback + exclude_last):-exclude_last] if s.get(field) is not None]
+    if len(vals) < 2: return None, None
+    arr = np.array(vals, dtype=float)
+    return float(arr.mean()), float(arr.std(ddof=1))
+
+def _rev_is_anomaly(value, mean, std, z_thr, min_abs):
+    if mean is None or std is None: return False
+    if abs(value - mean) < min_abs: return False
+    if std <= 0: return abs(value - mean) >= min_abs
+    return abs((value - mean) / std) >= z_thr
+
+def _rev_detect_anomalies(history, params):
+    out = {"any": False, "ce_unwind": False, "ce_build": False,
+           "pe_unwind": False, "pe_build": False, "imb_flip": False, "reasons": []}
+    if len(history) < 3: return out
+    cur = history[-1]; look = params["lookback"]; min_abs = params["min_abs_contracts"]
+    ce_mean, ce_std = _rev_baseline(history, "ce", look)
+    pe_mean, pe_std = _rev_baseline(history, "pe", look)
+    if _rev_is_anomaly(cur["ce"], ce_mean, ce_std, params["z"], min_abs):
+        if cur["ce"] < ce_mean:
+            out["ce_unwind"] = True
+            out["reasons"].append(f"CE ΔOI dropping (anomaly) — {_fmt_oi_units(cur['ce'])} vs baseline {_fmt_oi_units(ce_mean)}")
+        else:
+            out["ce_build"] = True
+            out["reasons"].append(f"CE ΔOI building (anomaly) — {_fmt_oi_units(cur['ce'])} vs baseline {_fmt_oi_units(ce_mean)}")
+    if _rev_is_anomaly(cur["pe"], pe_mean, pe_std, params["z"], min_abs):
+        if cur["pe"] > pe_mean:
+            out["pe_build"] = True
+            out["reasons"].append(f"PE ΔOI building (anomaly) — {_fmt_oi_units(cur['pe'])} vs baseline {_fmt_oi_units(pe_mean)}")
+        else:
+            out["pe_unwind"] = True
+            out["reasons"].append(f"PE ΔOI unwinding (anomaly) — {_fmt_oi_units(cur['pe'])} vs baseline {_fmt_oi_units(pe_mean)}")
+    if len(history) >= 6:
+        rec = [s["imb"] for s in history[-3:]]; ear = [s["imb"] for s in history[-6:-3]]
+        if ear and rec:
+            em = float(np.mean(ear)); rm = float(np.mean(rec))
+            if em * rm < 0:
+                out["imb_flip"] = True
+                out["reasons"].append(f"CE−PE imbalance flipped sign: {em:+.0f} → {rm:+.0f}")
+    out["any"] = any([out["ce_unwind"], out["ce_build"], out["pe_unwind"], out["pe_build"], out["imb_flip"]])
+    return out
+
+def _rev_bearish_score(history, anomalies):
+    if len(history) < 3: return 0, [], ["Insufficient history"], None, None, None, None
+    cur = history[-1]; ref = _rev_find_at(history, cur["ts"], 60)
+    score = 0; reasons, missing = [], []
+    if anomalies["ce_unwind"]: score += 20; reasons.append("CE ΔOI unwinding anomalously")
+    else: missing.append("No CE ΔOI unwinding anomaly")
+    if anomalies["pe_build"]: score += 20; reasons.append("PE ΔOI building anomalously")
+    else: missing.append("No PE ΔOI buildup anomaly")
+    if cur["pe"] > cur["ce"] * 1.1:
+        score += 15; reasons.append(f"PE ΔOI dominance ({_fmt_oi_units(cur['pe'])} vs {_fmt_oi_units(cur['ce'])})")
+    else: missing.append("PE ΔOI not dominant")
+    if ref:
+        d = cur["spot"] - ref["spot"]
+        if d < -5: score += 15; reasons.append(f"Nifty down {d:+.1f} pts (~1 min)")
+        else: missing.append("Nifty not falling")
+    else: missing.append("Need ~1 min price history")
+    if anomalies["imb_flip"]: score += 15; reasons.append("CE−PE imbalance flipped")
+    else: missing.append("No imbalance flip")
+    if ref and ref.get("pcr") is not None and cur.get("pcr") is not None:
+        dp = cur["pcr"] - ref["pcr"]
+        if dp < -0.02: score += 15; reasons.append(f"PCR falling {dp:+.3f}")
+        else: missing.append("PCR not falling")
+    else: missing.append("PCR history unavailable")
+    score = max(0, min(100, score)); spot = cur["spot"]
+    return (score, reasons, missing,
+            spot - 5 if spot else None, spot + 30 if spot else None,
+            spot + 15 if spot else None, 2.0 if score >= 60 else None)
+
+def _rev_bullish_score(history, anomalies):
+    if len(history) < 3: return 0, [], ["Insufficient history"], None, None, None, None
+    cur = history[-1]; ref = _rev_find_at(history, cur["ts"], 60)
+    score = 0; reasons, missing = [], []
+    if anomalies["pe_unwind"]: score += 20; reasons.append("PE ΔOI unwinding anomalously")
+    else: missing.append("No PE ΔOI unwinding anomaly")
+    if anomalies["ce_build"]: score += 20; reasons.append("CE ΔOI building anomalously")
+    else: missing.append("No CE ΔOI buildup anomaly")
+    if cur["ce"] > cur["pe"] * 1.1:
+        score += 15; reasons.append(f"CE ΔOI dominance ({_fmt_oi_units(cur['ce'])} vs {_fmt_oi_units(cur['pe'])})")
+    else: missing.append("CE ΔOI not dominant")
+    if ref:
+        d = cur["spot"] - ref["spot"]
+        if d > 5: score += 15; reasons.append(f"Nifty up {d:+.1f} pts (~1 min)")
+        else: missing.append("Nifty not rising")
+    else: missing.append("Need ~1 min price history")
+    if anomalies["imb_flip"]: score += 15; reasons.append("CE−PE imbalance flipped")
+    else: missing.append("No imbalance flip")
+    if ref and ref.get("pcr") is not None and cur.get("pcr") is not None:
+        dp = cur["pcr"] - ref["pcr"]
+        if dp > 0.02: score += 15; reasons.append(f"PCR rising {dp:+.3f}")
+        else: missing.append("PCR not rising")
+    else: missing.append("PCR history unavailable")
+    score = max(0, min(100, score)); spot = cur["spot"]
+    return (score, reasons, missing,
+            spot + 5 if spot else None, spot - 30 if spot else None,
+            spot - 15 if spot else None, 2.0 if score >= 60 else None)
+
+def _rev_push_alert(kind, msg, cooldown_sec):
+    now_ts = datetime.now(ist).timestamp()
+    cooldowns = st.session_state.get("rev_cooldowns", {})
+    if now_ts - cooldowns.get(kind, 0) < cooldown_sec: return False
+    cooldowns[kind] = now_ts
+    st.session_state.rev_cooldowns = cooldowns
+    alerts = st.session_state.get("rev_alerts", [])
+    alerts.append({"ts": datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S"), "type": kind, "msg": msg})
+    st.session_state.rev_alerts = alerts[-200:]
+    return True
+
+def _rev_label(score):
+    if score >= 75: return "🟢 STRONG CONFIRMATION", "#2e7d32"
+    if score >= 60: return "🟡 SETUP DEVELOPING", "#f9a825"
+    if score >= 40: return "🟠 WATCH", "#ef6c00"
+    return "⚪ NO CONFIRMATION", "#6e7781"
+
+def rev_render_meter(params, change_oi_resp, oi_resp, spot_price):
+    st.markdown("---")
+    st.subheader("🔄 Change-in-OI Reversal Meter")
+    st.caption(f"Sampling every **5 s** — last snapshot at **{datetime.now(ist).strftime('%H:%M:%S')} IST** "
+               f"| Spot **{spot_price:,.2f}**")
+    if spot_price <= 0:
+        st.info("ℹ️ Live Nifty price not available — reversal meter paused.")
+        return
+    snap = _rev_capture_snapshot(change_oi_resp, oi_resp, spot_price, params["window_strikes"])
+    if snap is None:
+        st.info("ℹ️ Change-in-OI data not available — reversal meter paused.")
+        return
+    _rev_add_snapshot(snap)
+    history = st.session_state.get("rev_snapshots", [])
+    if len(history) < 2:
+        st.info(f"⏳ Collecting snapshots ({len(history)}/2). Will activate shortly...")
+        agg = _rev_aggregate_change_oi(change_oi_resp, spot_price, params["window_strikes"])
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total CE ΔOI", _fmt_oi_units(agg["ce"]))
+        c2.metric("Total PE ΔOI", _fmt_oi_units(agg["pe"]))
+        c3.metric("CE − PE", _fmt_oi_units(agg["ce"] - agg["pe"]))
+        c4.metric("Strikes aggregated", agg["n"])
+        return
+    cur = history[-1]
+    prev = history[-2] if len(history) >= 2 else None
+    anomalies = _rev_detect_anomalies(history, params)
+    bear_score, bear_reasons, bear_missing, bear_trig, bear_inval, bear_sl, bear_rr = _rev_bearish_score(history, anomalies)
+    bull_score, bull_reasons, bull_missing, bull_trig, bull_inval, bull_sl, bull_rr = _rev_bullish_score(history, anomalies)
+    if anomalies["any"]:
+        if bear_score >= 60 and (anomalies["ce_unwind"] or anomalies["pe_build"]):
+            _rev_push_alert("bearish_setup",
+                            f"Bearish setup {bear_score:.0f}/100 — {bear_reasons[0] if bear_reasons else 'OI shift'}",
+                            params["cooldown_sec"])
+        if bull_score >= 60 and (anomalies["pe_unwind"] or anomalies["ce_build"]):
+            _rev_push_alert("bullish_setup",
+                            f"Bullish setup {bull_score:.0f}/100 — {bull_reasons[0] if bull_reasons else 'OI shift'}",
+                            params["cooldown_sec"])
+
+    st.markdown("#### 📊 Aggregate Change-in-OI (Cumulative vs Snapshot Δ)")
+    d_ce = (cur["ce"] - prev["ce"]) if prev else None
+    d_pe = (cur["pe"] - prev["pe"]) if prev else None
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total CE ΔOI", _fmt_oi_units(cur["ce"]),
+              delta=_fmt_oi_units(d_ce) if d_ce is not None else None,
+              help="Cumulative exchange-reported CE change-in-OI. Δ = change since previous snapshot.")
+    c2.metric("Total PE ΔOI", _fmt_oi_units(cur["pe"]),
+              delta=_fmt_oi_units(d_pe) if d_pe is not None else None,
+              help="Cumulative exchange-reported PE change-in-OI. Δ = change since previous snapshot.")
+    imb = cur["ce"] - cur["pe"]
+    c3.metric("CE − PE Imbalance", _fmt_oi_units(imb))
+    if prev:
+        prev_imb = prev["imb"]
+        pct_imb = ((imb - prev_imb) / abs(prev_imb) * 100) if prev_imb != 0 else None
+        c4.metric("Imbalance Δ%", f"{pct_imb:+.1f}%" if pct_imb is not None else "—")
+    else:
+        c4.metric("Imbalance Δ%", "—")
+
+    dominant, gauge_val = "NEUTRAL", 0
+    if bear_score > bull_score and bear_score >= 40: dominant, gauge_val = "BEARISH", -bear_score
+    elif bull_score > bear_score and bull_score >= 40: dominant, gauge_val = "BULLISH", bull_score
+    if PLOTLY_AVAILABLE:
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number", value=gauge_val,
+            number={'font': {'size': 26}},
+            title={'text': f"{dominant} pressure", 'font': {'size': 16}},
+            gauge={'axis': {'range': [-100, 100], 'tickwidth': 1}, 'bar': {'color': '#1a1a1a'},
+                   'steps': [
+                       {'range': [-100, -75], 'color': '#c62828'},
+                       {'range': [-75, -40],  'color': '#ef6c00'},
+                       {'range': [-40, -15],  'color': '#ffe082'},
+                       {'range': [-15, 15],   'color': '#e0e0e0'},
+                       {'range': [15, 40],    'color': '#c8e6c9'},
+                       {'range': [40, 75],    'color': '#66bb6a'},
+                       {'range': [75, 100],   'color': '#2e7d32'},
+                   ],
+                   'threshold': {'line': {'color': 'black', 'width': 3}, 'thickness': 0.8, 'value': gauge_val}},
+        ))
+        fig.update_layout(height=240, margin=dict(l=20, r=20, t=40, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.markdown(f"**Directional Gauge**: {'🔴 Bearish' if gauge_val < 0 else '🟢 Bullish' if gauge_val > 0 else '⚪ Neutral'} (score {gauge_val:+.0f}/100)")
+
+    st.markdown("#### 🕒 Multi-Interval Change Detection")
+    intervals = [(30, "30 sec"), (60, "1 min"), (180, "3 min"), (300, "5 min")]
+    rows = []
+    for sec, label in intervals:
+        ref = _rev_find_at(history, cur["ts"], sec)
+        if not ref:
+            rows.append({"Window": label, "Spot Δ": "—", "CE ΔOI Δ": "—", "PE ΔOI Δ": "—",
+                         "Imbalance Δ": "—", "Rate (Δ/min)": "—"}); continue
+        actual_sec = max(1.0, (cur["ts"] - ref["ts"]).total_seconds())
+        scale = 60.0 / actual_sec
+        spot_delta = cur["spot"] - ref["spot"]
+        ce_delta = cur["ce"] - ref["ce"]; pe_delta = cur["pe"] - ref["pe"]
+        imb_delta = cur["imb"] - ref["imb"]
+        rate = (pe_delta - ce_delta) * scale
+        rows.append({"Window": label, "Spot Δ": f"{spot_delta:+.1f}",
+                     "CE ΔOI Δ": _fmt_oi_units(ce_delta),
+                     "PE ΔOI Δ": _fmt_oi_units(pe_delta),
+                     "Imbalance Δ": _fmt_oi_units(imb_delta),
+                     "Rate (Δ/min)": _fmt_oi_units(rate)})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.caption("ΔOI Δ = change in *cumulative* change-in-OI between the two snapshots. "
+               "Rate = scale-normalised net PE−CE change per minute.")
+
+    if anomalies["any"]:
+        st.warning("**⚡ OI Reversal Anomalies Detected:**\n\n" + "\n".join(f"- {r}" for r in anomalies["reasons"]))
+    else:
+        st.info("No statistical OI reversal anomalies detected in the latest snapshot.")
+
+    st.markdown("#### 🎯 Rule-Based Setup Scores")
+    cA, cB = st.columns(2)
+
+    def score_card(col, title, score, reasons, missing, trig, inval, sl, rr, bearish=True):
+        label, color = _rev_label(score)
+        border = "#c62828" if bearish else "#2e7d32"
+        with col:
+            st.markdown(
+                f'<div class="rev-card" style="border-left-color:{border};">'
+                f'<div class="rev-title">{title} <span class="rev-pill rev-pill-gray">{label}</span></div>'
+                f'<div style="font-size:1.6rem; font-weight:800; margin:6px 0; color:{color};">{score:.0f}/100</div>'
+                f'<div class="rev-sub"><b>Reasons:</b><br>' +
+                ("".join(f"✅ {r}<br>" for r in reasons) if reasons else "—") +
+                f'<br><b>Missing:</b><br>' +
+                ("".join(f"⭕ {m}<br>" for m in missing[:4]) if missing else "—") +
+                (f'<br><b>Trigger:</b> {trig:,.1f}' if trig else '') +
+                (f'<br><b>Invalidation:</b> {inval:,.1f}' if inval else '') +
+                (f'<br><b>SL ref:</b> {sl:,.1f} &nbsp;|&nbsp; R:R ≈ {rr:.1f}' if sl and rr else '') +
+                '</div></div>', unsafe_allow_html=True)
+
+    score_card(cA, "🔴 BEARISH (PE) Setup", bear_score, bear_reasons, bear_missing,
+               bear_trig, bear_inval, bear_sl, bear_rr, bearish=True)
+    score_card(cB, "🟢 BULLISH (CE) Setup", bull_score, bull_reasons, bull_missing,
+               bull_trig, bull_inval, bull_sl, bull_rr, bearish=False)
+    st.caption("⚠️ Decision-support only. Scores are heuristic, not probabilities. "
+               "Validate against price action, liquidity and historical performance before taking a trade.")
+
+    if PLOTLY_AVAILABLE and len(history) >= 3:
+        st.markdown("#### 📈 Charts")
+        ts_list = [s["ts"] for s in history]
+        ce_list = [s["ce"] for s in history]; pe_list = [s["pe"] for s in history]
+        imb_list = [s["imb"] for s in history]; spot_list = [s["spot"] for s in history]
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(x=ts_list, y=ce_list, mode="lines", name="CE ΔOI",
+                                  line=dict(color="#c62828", width=2)))
+        fig1.add_trace(go.Scatter(x=ts_list, y=pe_list, mode="lines", name="PE ΔOI",
+                                  line=dict(color="#2e7d32", width=2)))
+        fig1.update_layout(title="Cumulative CE vs PE Change-in-OI", height=300,
+                           margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation="h"))
+        st.plotly_chart(fig1, use_container_width=True)
+        fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+        fig2.add_trace(go.Bar(x=ts_list, y=imb_list, name="CE−PE Imbalance",
+                              marker_color=["#c62828" if v < 0 else "#2e7d32" for v in imb_list],
+                              opacity=0.5), secondary_y=False)
+        fig2.add_trace(go.Scatter(x=ts_list, y=spot_list, mode="lines", name="Nifty Spot",
+                                  line=dict(color="#1e88e5", width=2)), secondary_y=True)
+        fig2.update_layout(title="CE−PE Imbalance vs Nifty Spot", height=300,
+                           margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation="h"))
+        fig2.update_yaxes(title_text="Imbalance (contracts)", secondary_y=False)
+        fig2.update_yaxes(title_text="Nifty", secondary_y=True)
+        st.plotly_chart(fig2, use_container_width=True)
+        if len(history) >= 2:
+            v_ce, v_pe = [], []; prev_s = history[0]
+            for s in history:
+                dt_sec = max(1.0, (s["ts"] - prev_s["ts"]).total_seconds())
+                v_ce.append((s["ce"] - prev_s["ce"]) * (60.0 / dt_sec))
+                v_pe.append((s["pe"] - prev_s["pe"]) * (60.0 / dt_sec))
+                prev_s = s
+            fig3 = go.Figure()
+            fig3.add_trace(go.Scatter(x=ts_list, y=v_ce, mode="lines", name="CE velocity /min",
+                                      line=dict(color="#c62828", width=2)))
+            fig3.add_trace(go.Scatter(x=ts_list, y=v_pe, mode="lines", name="PE velocity /min",
+                                      line=dict(color="#2e7d32", width=2)))
+            fig3.update_layout(title="OI Velocity (ΔOI change per minute)", height=280,
+                               margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation="h"))
+            st.plotly_chart(fig3, use_container_width=True)
+
+    alerts = st.session_state.get("rev_alerts", [])
+    with st.expander(f"🔔 Alert log ({len(alerts)} entries)", expanded=False):
+        if not alerts: st.caption("No alerts recorded yet.")
+        else:
+            for a in reversed(alerts[-30:]):
+                cls = "rev-alert-bear" if "bear" in a["type"] else ("rev-alert-bull" if "bull" in a["type"] else "rev-alert-neutral")
+                st.markdown(f'<div class="rev-alert-item {cls}"><b>{a["ts"]}</b> — {a["msg"]}</div>',
+                            unsafe_allow_html=True)
+
+    with st.expander("🧪 Quick backtest summary (recorded snapshots only)", expanded=False):
+        if len(history) < 10:
+            st.info(f"Need more history. Collected {len(history)} snapshots so far.")
+        else:
+            hits_bear = 0; total_bear = 0; hits_bull = 0; total_bull = 0
+            for i in range(4, len(history) - 4):
+                sub = history[:i+1]
+                an = _rev_detect_anomalies(sub, params)
+                if not an["any"]: continue
+                bs, *_ = _rev_bearish_score(sub, an)
+                ls, *_ = _rev_bullish_score(sub, an)
+                fut = history[i+4]
+                spot_now = sub[-1]["spot"]; spot_fut = fut["spot"]
+                if bs >= 60:
+                    total_bear += 1
+                    if spot_fut < spot_now: hits_bear += 1
+                if ls >= 60:
+                    total_bull += 1
+                    if spot_fut > spot_now: hits_bull += 1
+            st.write(f"**Bearish signals**: {total_bear} (hit rate {hits_bear/max(1,total_bear)*100:.0f}%)")
+            st.write(f"**Bullish signals**: {total_bull} (hit rate {hits_bull/max(1,total_bull)*100:.0f}%)")
+            st.caption("Hit = Nifty moved in the predicted direction within ~1 min (4 snapshots). "
+                       "Excludes brokerage/taxes/slippage. Not a profit guarantee.")
+
+# Build params from sidebar settings
+rev_params = {
+    "window_strikes": rev_window_strikes,
+    "lookback": rev_lookback,
+    "z": rev_z_threshold,
+    "min_abs_contracts": rev_min_abs_lakh * 1_00_000,
+    "cooldown_sec": rev_cooldown_min * 60,
+}
+
+# ---- Fragment: 5-second reversal sampler ----
+def _rev_fragment_body():
+    try:
+        c_oi = _sampled_change_oi('NSE_INDEX|Nifty 50', expiry_str, today_str)
+    except Exception as e:
+        st.error(f"Reversal meter: change-OI fetch failed — {e}")
+        return
+    try:
+        oi_r = _sampled_oi('NSE_INDEX|Nifty 50', expiry_str, today_str)
+    except Exception:
+        oi_r = None
+    spot = _sampled_spot()
+    if not spot: spot = nifty_price
+    rev_render_meter(rev_params, c_oi, oi_r, spot)
+
+if _FRAGMENT_SUPPORTED:
+    @_frag(run_every=5)
+    def _run_rev_fragment():
+        _rev_fragment_body()
+else:
+    def _run_rev_fragment():
+        _rev_fragment_body()
 
 # ==============================
 # UI RENDER
 # ==============================
+st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
+entry_datetime = nifty_gate["time_label"]
 
-# Dynamic title based on selected index
-if index_selection == "Nifty":
-    st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
-elif index_selection == "Sensex":
-    st.title("🔮 Sensex Analytics & Strategy Suite — Pro")
+if divergence_detected:
+    st.markdown(f'<div class="divergence-alert">{divergence_msg}</div>', unsafe_allow_html=True)
+if vix_warning:
+    st.markdown(f'<div class="vix-alert">{vix_warning}</div>', unsafe_allow_html=True)
+
+render_oi_meter(nifty_meter, "Nifty", nifty_price)
+
+st.subheader("📊 Code 1 — Nifty OI Change Entry Signal")
+render_gate_panel(nifty_gate, "Nifty")
+if nifty_entry_signal:
+    signal = nifty_entry_signal["signal"]; active = nifty_entry_signal["active"]
+    emoji = "🟢" if signal == "BUY" else "🔴"
+    status_text = entry_status_text(nifty_entry_signal)
+    if active and signal == "BUY": bg_color = "#2e7d32"; text_color = "white"
+    elif active and signal == "SELL": bg_color = "#c62828"; text_color = "white"
+    else: bg_color = "#f9a825"; text_color = "black"
+    border_color = "#2e7d32" if signal == "BUY" else "#c62828"
+    st.markdown(f"""
+    <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_entry_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{nifty_entry_signal['high_type']}</span>
+            </div>
+            <div style="font-weight: bold;">
+                <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
+                <span style="margin-left: 20px; font-size: 0.9rem;">⏱ {entry_datetime}</span>
+            </div>
+        </div>
+        <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{nifty_entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{nifty_entry_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {nifty_entry_signal['reason']}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    render_greeks_panel(nifty_entry_signal, "Nifty Entry")
 else:
-    st.title("🔮 BankNifty Analytics & Strategy Suite — Pro")
+    st.info("ℹ️ No Nifty Change OI entry signal (gap < 100 pts or no opposite OI).")
 
-# ==============================
-# NIFTY-SPECIFIC VIEW (with reordered components)
-# ==============================
-if index_selection == "Nifty":
-    entry_datetime = nifty_gate["time_label"]
-
-    # ---- Divergence and VIX Alerts (placed near top) ----
-    if divergence_detected:
-        st.markdown(f'<div class="divergence-alert">{divergence_msg}</div>', unsafe_allow_html=True)
-    if vix_warning:
-        st.markdown(f'<div class="vix-alert">{vix_warning}</div>', unsafe_allow_html=True)
-
-    # ---- Code 1: Nifty OI Change Entry/Exit (was Code 4) ----
-    render_oi_meter(nifty_meter, "Nifty", nifty_price)
-    st.subheader("📊 Code 1 — Nifty OI Change Entry Signal")
-    render_gate_panel(nifty_gate, "Nifty")
-    if nifty_entry_signal:
-        signal = nifty_entry_signal["signal"]
-        active = nifty_entry_signal["active"]
-        emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = entry_status_text(nifty_entry_signal)
-        # Background color: green for active BUY, red for active SELL, amber for pending
-        if active and signal == "BUY":
-            bg_color = "#2e7d32"
-            text_color = "white"
-        elif active and signal == "SELL":
-            bg_color = "#c62828"
-            text_color = "white"
-        else:
-            bg_color = "#f9a825"
-            text_color = "black"
-        border_color = "#2e7d32" if signal == "BUY" else "#c62828"
-        st.markdown(f"""
-        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                <div>
-                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
-                    <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_entry_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{nifty_entry_signal['high_type']}</span>
-                </div>
-                <div style="font-weight: bold;">
-                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">⏱ {entry_datetime}</span>
-                </div>
+st.subheader("📊 Code 1 — Nifty OI Change Exit Signal")
+if nifty_exit_signal:
+    signal = nifty_exit_signal["signal"]; active = nifty_exit_signal["active"]
+    emoji = "🟢" if signal == "BUY" else "🔴"
+    status_text = "🎯 TARGET REACHED" if active else "PENDING — target not reached yet"
+    bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
+    text_color = "white" if active else "black"
+    border_color = "#0277bd" if signal=="BUY" else "#d84315"
+    st.markdown(f"""
+    <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
+                <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_exit_signal['trigger_price']:,.2f}</span>
+                <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{nifty_exit_signal['high_type']}</span>
             </div>
-            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-                <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{nifty_entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{nifty_entry_signal['oi_diff']:,.0f}</b></span>
-                <span style="margin-left: 20px;">📌 {nifty_entry_signal['reason']}</span>
+            <div style="font-weight: bold;">
+                <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
+                <span style="margin-left: 20px; font-size: 0.9rem;">Updated: {updated_datetime}</span>
             </div>
         </div>
-        """, unsafe_allow_html=True)
-        render_greeks_panel(nifty_entry_signal, "Nifty Entry")
-    else:
-        st.info("ℹ️ No Nifty Change OI entry signal (gap < 100 pts or no opposite OI).")
-
-    st.subheader("📊 Code 1 — Nifty OI Change Exit Signal")
-    if nifty_exit_signal:
-        signal = nifty_exit_signal["signal"]
-        active = nifty_exit_signal["active"]
-        emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "🎯 TARGET REACHED" if active else "PENDING — target not reached yet"
-        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
-        text_color = "white" if active else "black"
-        border_color = "#0277bd" if signal=="BUY" else "#d84315"
-        st.markdown(f"""
-        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                <div>
-                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
-                    <span style="margin-left: 15px; font-size: 1.2rem;">at {nifty_exit_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{nifty_exit_signal['high_type']}</span>
-                </div>
-                <div style="font-weight: bold;">
-                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Updated: {updated_datetime}</span>
-                </div>
-            </div>
-            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-                <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{nifty_exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{nifty_exit_signal['oi_diff']:,.0f}</b></span>
-                <span style="margin-left: 20px;">📌 {nifty_exit_signal['reason']}</span>
-            </div>
+        <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
+            <span>📊 Current Nifty: <b>{nifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{nifty_exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{nifty_exit_signal['oi_diff']:,.0f}</b></span>
+            <span style="margin-left: 20px;">📌 {nifty_exit_signal['reason']}</span>
         </div>
-        """, unsafe_allow_html=True)
-        render_greeks_panel(nifty_exit_signal, "Nifty Exit")
-    else:
-        st.info("ℹ️ No Nifty exit signal available (opposite OI build‑up not found or gap < 100 pts).")
+    </div>
+    """, unsafe_allow_html=True)
+    render_greeks_panel(nifty_exit_signal, "Nifty Exit")
+else:
+    st.info("ℹ️ No Nifty exit signal available (opposite OI build-up not found or gap < 100 pts).")
 
-    # ---- Nifty OI Data ----
-    reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
-    reusable_display_oi_data(upstoxOiChangeResponse, "Nifty Change in OI")
+# ===== NEW: Reversal Meter (independent 5 s sampler) =====
+if rev_enabled:
+    _run_rev_fragment()
 
-    # ---- Nifty OI Flow ----
-    if nifty_flow_result["rows"]:
-        st.subheader(f"{nifty_flow_result['title']} — Macro Score: {nifty_flow_result['score']:.2f}")
-        st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
-        indicator = "Bullish" if nifty_flow_result["score"] > 0 else ("Bearish" if nifty_flow_result["score"] < 0 else "Sideways")
-        st.write(f"Market Bias: {indicator}")
-        st.dataframe(pd.DataFrame(nifty_flow_result["rows"]))
-    else:
-        st.info("No Nifty futures met the turnover threshold right now.")
+# ---- Nifty OI Data ----
+reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
+reusable_display_oi_data(upstoxOiChangeResponse, "Nifty Change in OI")
 
-    # ---- Now place Code 2, Code 3, Code 4 at the bottom ----
-    st.markdown("---")
-    st.subheader("📊 Prediction Models (Code 2, 3, 4)")
-
-    # Use columns to display Code 2, 3, 4 side by side
-    col2, col3, col4 = st.columns(3)
-
-    with col2:
-        st.subheader("📊 Code 2 — Global Weighted Predictor")
-        status_c1 = "Achieved" if (
-            (sentiment_score_c1 > 0.01 and nifty_price >= target_price_c1) or
-            (sentiment_score_c1 < -0.01 and nifty_price <= target_price_c1)
-        ) else "Pending"
-        achieved_class = "prediction-achieved" if status_c1 == "Achieved" else ""
-        vix_note = f" | US VIX dampener: {us_vix_dampener:.0%} | India VIX: {india_vix_dampener:.0%}" if combined_dampener < 1.0 else ""
-        st.markdown(f"""
-            <div class="prediction-box {achieved_class}" style="min-height: 240px;">
-                <div class="status-badge">{'ACTIVE' if not divergence_detected else 'DIVERTED'}</div>
-                <p style="margin:0; opacity:0.8; font-size:0.9rem;">Weighted Global Sentiment (VIX-adjusted){vix_note}</p>
-                <h2 style="margin:5px 0; font-size:2rem;">{pred_text_c1} ({sentiment_score_c1:+.2f})</h2>
-                <div style="display:flex; justify-content:center; gap:20px; margin-top:12px; font-weight:bold; font-size:1.1rem;">
-                    <span>🎯 Target: {target_price_c1:,.2f}</span>
-                    <span>↕️ {pred_change_c1:+.2f} pts</span>
-                    <span>📊 {pred_pct_c1:+.2f}%</span>
-                </div>
-                <p style="font-size:0.82rem; margin-top:8px; opacity:0.7;">Raw sentiment: {raw_sentiment:+.2f}% | Prev Close: {nifty_prev_close:,.2f} | Current: {nifty_price:,.2f} ({nifty_change_pct:+.2f}%)</p>
-                <div class="confidence-tag">Confidence: {confidence:.1f}%</div>
-                <div style="margin-top:10px; font-size:1.1rem;">Status: <b>{status_c1}</b></div>
-            </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-        st.subheader("⚖️ Code 3 — Multi-Factor Signal Engine")
-        box2_badge = "WAITING" if not is_after_china else ("🚀 STRONG SIGNAL" if signal_strength == "STRONG" else ("📊 MODERATE" if signal_strength == "MODERATE" else "⏸️ WEAK / NO CONF"))
-        score_bar = "█" * score_c2 + "░" * (5 - score_c2)
-        st.markdown(f"""
-            <div class="prediction-card {card_class_c2}" style="min-height:240px; padding:20px;">
-                <div class="status-badge">{box2_badge}</div>
-                <h2 style="margin:0; font-size:2rem;">{prediction_c2} — {signal_strength}</h2>
-                <div class="signal-score-bar">Signal Score: {score_bar} {score_c2}/5 &nbsp;|&nbsp; 🟢 {bull_votes_c2} vs 🔴 {bear_votes_c2} &nbsp;|&nbsp; 🚀 {momentum_label}</div>
-                <div class="price-large" style="font-size:2.1rem; margin:6px 0;">Target: {target_c2:,.2f}</div>
-                <div class="move-text" style="font-size:1.1rem; margin-bottom:5px;">Move: {points_move_c2:+,.2f} pts ({display_move_pct_c2:+.2f}%) &nbsp;[Dynamic Blend]</div>
-                <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">STOP LOSS: {stop_loss_c2:,.2f}</div>
-                <p style="margin-top:10px; font-size:0.82rem; opacity:0.8;">Ref Prev Close: {nifty_prev_close:,.2f} | Current: {nifty_price:,.2f}</p>
-            </div>
-        """, unsafe_allow_html=True)
-
-    with col4:
-        st.subheader("📊 Code 4 — OI + Change OI + Flow")
-        net_change_str = f"Δ Calls: {oi_signal['net_call_change']:+,.0f} | Δ Puts: {oi_signal['net_put_change']:+,.0f}"
-        macro_str = f"Flow Score: {oi_signal['macro_flow_score']:+.2f}" if oi_signal['macro_flow_score'] is not None else "Flow: N/A"
-        st.markdown(f"""
-            <div class="prediction-card {oi_card_class}" style="min-height:240px; padding:20px;">
-                <div class="status-badge">OI + FLOW SIGNAL</div>
-                <h2 style="margin:0; font-size:2rem;">{oi_signal['direction']}</h2>
-                <div style="margin:6px 0; font-size:0.9rem;">Max Pain: {oi_signal['max_pain']:,.2f} &nbsp;|&nbsp; PCR: {oi_signal['pcr']:.2f}</div>
-                <div style="font-size:0.85rem; margin-bottom:5px; opacity:0.9;">{net_change_str}<br>{macro_str}</div>
-                <div class="price-large" style="font-size:2.1rem; margin:6px 0;">Target: {oi_signal['target']:,.2f}</div>
-                <div style="font-size:0.9rem; margin-bottom:5px;">S: {oi_signal['support']:,.2f} &nbsp;|&nbsp; R: {oi_signal['resistance']:,.2f}
-                <br>Chg‑S: {oi_signal['max_put_change_strike'] if oi_signal['max_put_change_strike'] else '—'} &nbsp;|&nbsp; Chg‑R: {oi_signal['max_call_change_strike'] if oi_signal['max_call_change_strike'] else '—'}</div>
-                <div class="sl-badge" style="font-size:1rem; padding:4px 15px;">STOP: {oi_signal['stop_loss']:,.2f}</div>
-                <div style="margin-top:10px; font-size:0.9rem; opacity:0.9;">Votes 🟢 {oi_signal['bull_votes']} vs 🔴 {oi_signal['bear_votes']} &nbsp;·&nbsp; Confidence {oi_signal['confidence']}%</div>
-            </div>
-        """, unsafe_allow_html=True)
-
-    # ---- Expander for signal reasoning (placed after Code 3, since it refers to Code 3) ----
-    with st.expander("🧠 Signal Reasoning — Why this signal fired (or didn't)", expanded=False):
-        st.markdown("**Enhanced Code 3 factor-by-factor breakdown:**")
-        for r in reasons_c2:
-            st.markdown(f"- {r}")
-        if pressure_reasons:
-            st.markdown("**Domestic Pressure Factors:**")
-            for r in pressure_reasons:
-                st.markdown(f"- {r}")
-        if score_c2 < min_signal_score:
-            st.warning(f"Signal score {score_c2}/5 is below your minimum threshold of {min_signal_score}. Signal suppressed.")
-        if not is_after_china:
-            st.info("China market hasn't closed yet (12:30 PM IST). Code 3 signal will activate after that.")
-        if "STRONG" in momentum_label and abs(nifty_change_pct) > 0.5:
-            st.success(f"🚀 Strong momentum ({momentum_label}: {momentum_pct:+.2f}%) overrode signal threshold")
-
-# ==============================
-# SENSEX-SPECIFIC VIEW
-# ==============================
-elif index_selection == "Sensex":
-    entry_datetime = sensex_gate["time_label"]
-
-    # ---- Code 5 – Sensex Entry & Exit ----
-    render_oi_meter(sensex_meter, "Sensex", sensex_price)
-    st.subheader("📊 Code 5 — Sensex OI Change Entry Signal")
-    render_gate_panel(sensex_gate, "Sensex")
-    if sensex_entry_signal:
-        signal = sensex_entry_signal["signal"]
-        active = sensex_entry_signal["active"]
-        emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = entry_status_text(sensex_entry_signal)
-        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
-        text_color = "white" if active else "black"
-        border_color = "#2e7d32" if signal=="BUY" else "#c62828"
-        st.markdown(f"""
-        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                <div>
-                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
-                    <span style="margin-left: 15px; font-size: 1.2rem;">at {sensex_entry_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{sensex_entry_signal['high_type']}</span>
-                </div>
-                <div style="font-weight: bold;">
-                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">⏱ {entry_datetime}</span>
-                </div>
-            </div>
-            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-                <span>📊 Current Sensex: <b>{sensex_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{sensex_entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{sensex_entry_signal['oi_diff']:,.0f}</b></span>
-                <span style="margin-left: 20px;">📌 {sensex_entry_signal['reason']}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        render_greeks_panel(sensex_entry_signal, "Sensex Entry")
-    else:
-        st.info("ℹ️ No Sensex Change OI entry signal (gap < 100 pts or no opposite OI).")
-
-    st.subheader("📊 Code 5 — Sensex OI Change Exit Signal")
-    if sensex_exit_signal:
-        signal = sensex_exit_signal["signal"]
-        active = sensex_exit_signal["active"]
-        emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "🎯 TARGET REACHED" if active else "PENDING — target not reached yet"
-        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
-        text_color = "white" if active else "black"
-        border_color = "#0277bd" if signal=="BUY" else "#d84315"
-        st.markdown(f"""
-        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                <div>
-                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
-                    <span style="margin-left: 15px; font-size: 1.2rem;">at {sensex_exit_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{sensex_exit_signal['high_type']}</span>
-                </div>
-                <div style="font-weight: bold;">
-                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Updated: {updated_datetime}</span>
-                </div>
-            </div>
-            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-                <span>📊 Current Sensex: <b>{sensex_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{sensex_exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{sensex_exit_signal['oi_diff']:,.0f}</b></span>
-                <span style="margin-left: 20px;">📌 {sensex_exit_signal['reason']}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        render_greeks_panel(sensex_exit_signal, "Sensex Exit")
-    else:
-        st.info("ℹ️ No Sensex exit signal available (opposite OI build‑up not found or gap < 100 pts).")
-
-    # ---- Sensex OI Data ----
-    reusable_display_oi_data(upstoxSensexOiResponse, "Sensex Open Interest Data")
-    reusable_display_oi_data(upstoxSensexOiChangeResponse, "Sensex Change in OI")
-
-    # ---- Sensex OI Flow ----
-    if sensex_flow_result["rows"]:
-        st.subheader(f"{sensex_flow_result['title']} — Macro Score: {sensex_flow_result['score']:.2f}")
-        st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
-        indicator = "Bullish" if sensex_flow_result["score"] > 0 else ("Bearish" if sensex_flow_result["score"] < 0 else "Sideways")
-        st.write(f"Market Bias: {indicator}")
-        st.dataframe(pd.DataFrame(sensex_flow_result["rows"]))
-    else:
-        st.info("No Sensex futures met the turnover threshold right now.")
-
-# ==============================
-# BANKNIFTY-SPECIFIC VIEW
-# ==============================
-elif index_selection == "BankNifty":
-    entry_datetime = banknifty_gate["time_label"]
-
-    # ---- Code 6 – BankNifty Entry & Exit ----
-    render_oi_meter(banknifty_meter, "BankNifty", banknifty_price)
-    st.subheader("📊 Code 6 — BankNifty OI Change Entry Signal")
-    render_gate_panel(banknifty_gate, "BankNifty")
-    if banknifty_entry_signal:
-        signal = banknifty_entry_signal["signal"]
-        active = banknifty_entry_signal["active"]
-        emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = entry_status_text(banknifty_entry_signal)
-        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
-        text_color = "white" if active else "black"
-        border_color = "#2e7d32" if signal=="BUY" else "#c62828"
-        st.markdown(f"""
-        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                <div>
-                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} {signal} ENTRY</span>
-                    <span style="margin-left: 15px; font-size: 1.2rem;">at {banknifty_entry_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{banknifty_entry_signal['high_type']}</span>
-                </div>
-                <div style="font-weight: bold;">
-                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">⏱ {entry_datetime}</span>
-                </div>
-            </div>
-            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-                <span>📊 Current BankNifty: <b>{banknifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{banknifty_entry_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{banknifty_entry_signal['oi_diff']:,.0f}</b></span>
-                <span style="margin-left: 20px;">📌 {banknifty_entry_signal['reason']}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        render_greeks_panel(banknifty_entry_signal, "BankNifty Entry")
-    else:
-        st.info("ℹ️ No BankNifty Change OI entry signal (gap < 100 pts or no opposite OI).")
-
-    st.subheader("📊 Code 6 — BankNifty OI Change Exit Signal")
-    if banknifty_exit_signal:
-        signal = banknifty_exit_signal["signal"]
-        active = banknifty_exit_signal["active"]
-        emoji = "🟢" if signal == "BUY" else "🔴"
-        status_text = "🎯 TARGET REACHED" if active else "PENDING — target not reached yet"
-        bg_color = "#2e7d32" if active and signal=="BUY" else ("#c62828" if active and signal=="SELL" else "#f9a825")
-        text_color = "white" if active else "black"
-        border_color = "#0277bd" if signal=="BUY" else "#d84315"
-        st.markdown(f"""
-        <div class="entry-box" style="background: {bg_color}; border-left-color: {border_color}; color: {text_color};">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                <div>
-                    <span style="font-size: 1.8rem; font-weight: 800;">{emoji} EXIT ({'BUY to cover' if signal=='BUY' else 'SELL to close'})</span>
-                    <span style="margin-left: 15px; font-size: 1.2rem;">at {banknifty_exit_signal['trigger_price']:,.2f}</span>
-                    <span style="margin-left: 15px; background: rgba(0,0,0,0.15); padding: 2px 10px; border-radius: 20px;">{banknifty_exit_signal['high_type']}</span>
-                </div>
-                <div style="font-weight: bold;">
-                    <span class="status-text" style="background: rgba(0,0,0,0.3); padding: 2px 10px; border-radius: 8px;">{status_text}</span>
-                    <span style="margin-left: 20px; font-size: 0.9rem;">Updated: {updated_datetime}</span>
-                </div>
-            </div>
-            <div style="margin-top: 8px; font-size: 0.95rem; opacity: 0.9;">
-                <span>📊 Current BankNifty: <b>{banknifty_price:,.2f}</b> &nbsp;|&nbsp; Key Strike: <b>{banknifty_exit_signal['strike']}</b> &nbsp;|&nbsp; OI Diff: <b>{banknifty_exit_signal['oi_diff']:,.0f}</b></span>
-                <span style="margin-left: 20px;">📌 {banknifty_exit_signal['reason']}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        render_greeks_panel(banknifty_exit_signal, "BankNifty Exit")
-    else:
-        st.info("ℹ️ No BankNifty exit signal available (opposite OI build‑up not found or gap < 100 pts).")
-
-    # ---- BankNifty OI Data ----
-    reusable_display_oi_data(upstoxBankNiftyOiResponse, "BankNifty Open Interest Data")
-    reusable_display_oi_data(upstoxBankNiftyOiChangeResponse, "BankNifty Change in OI")
-
-    # ---- BankNifty OI Flow ----
-    if banknifty_flow_result["rows"]:
-        st.subheader(f"{banknifty_flow_result['title']} — Macro Score: {banknifty_flow_result['score']:.2f}")
-        st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
-        indicator = "Bullish" if banknifty_flow_result["score"] > 0 else ("Bearish" if banknifty_flow_result["score"] < 0 else "Sideways")
-        st.write(f"Market Bias: {indicator}")
-        st.dataframe(pd.DataFrame(banknifty_flow_result["rows"]))
-    else:
-        st.info("No BankNifty futures met the turnover threshold right now.")
-
-# ==============================
-# GLOBAL DASHBOARD (visible for both selections)
-# ==============================
-
-# ---- Pill indicators (global) ----
-def pill(label, value, pct, invert=False):
-    if pct is None:
-        return f'<span class="indicator-pill pill-gray">{label}: —</span>'
-    good = pct < 0 if invert else pct > 0
-    bad = pct > 0 if invert else pct < 0
-    cls = "pill-green" if good else ("pill-red" if bad else "pill-yellow")
-    sign = "+" if pct > 0 else ""
-    return f'<span class="indicator-pill {cls}">{label}: {value:.2f} ({sign}{pct:.2f}%)</span>'
-
-vix_pill_cls = "pill-green" if vix_value < 15 else ("pill-red" if vix_value > vix_threshold else "pill-yellow")
-vix_pill = f'<span class="indicator-pill {vix_pill_cls}">😨 US VIX: {vix_value:.1f} [{vix_regime}]</span>' if vix_value > 0 else ""
-india_vix_color = "pill-green" if india_vix_value < 20 else ("pill-red" if india_vix_value > india_vix_threshold else "pill-yellow")
-india_vix_pill = f'<span class="indicator-pill {india_vix_color}">🇮🇳 India VIX: {india_vix_value:.1f} [{india_vix_regime}]</span>' if india_vix_value > 0 else ""
-momentum_color = "pill-green" if "BULLISH" in momentum_label else ("pill-red" if "BEARISH" in momentum_label else "pill-yellow")
-momentum_pill = f'<span class="indicator-pill {momentum_color}">🚀 {momentum_label}: {momentum_pct:+.2f}%</span>'
-
-pills_html = f"""
-<div class="indicator-row">
-    {vix_pill}
-    {india_vix_pill}
-    {momentum_pill}
-    {pill("🏦 BNF", sgx_pct, sgx_pct)}
-    {pill("🎁 GIFT", gift_pct, gift_pct)}
-    {pill("🇭🇰 HSI", hangseng_pct, hangseng_pct)}
-    {pill("💱 USD/INR", usdinr_pct, usdinr_pct, invert=True)}
-    {pill("🇺🇸 NDX", nasdaq_pct, nasdaq_pct)}
-    {pill("🇨🇳 CSI", china_pct, china_pct)}
-</div>
-"""
-st.markdown(pills_html, unsafe_allow_html=True)
-
-if "SELLING" in pressure_type:
-    st.warning(f"🔴 Domestic Selling Pressure Detected (Score: {pressure_score:.1f})")
-elif "BUYING" in pressure_type:
-    st.success(f"✅ Domestic Buying Pressure Detected (Score: {pressure_score:.1f})")
-
-# ---- Volatility alerts ----
-if volatility_alerts:
-    items = "".join([f"<li>{a}</li>" for a in volatility_alerts])
-    st.markdown(f'<div class="vix-alert">⚠️ High Volatility Moves:<ul>{items}</ul></div>', unsafe_allow_html=True)
-
-# ---- Live Tracking Table ----
-st.subheader("📈 Live Tracking — All Instruments")
-for i in range(0, len(final_display), 3):
-    cols = st.columns(3)
-    for j in range(3):
-        if i + j < len(final_display):
-            item = final_display[i + j]
-            s = item["s"]
-            close = item["close"]; pct = item["pct"]
-            abs_v = item["abs"];   prev = item["prev"]
-            if close > 0 or pct != 0:
-                color_class = "positive" if pct > 0 else "negative" if pct < 0 else "neutral-color"
-                arrow = "▲" if pct > 0 else "▼" if pct < 0 else "—"
-                strategy_tag = "STRATEGY COMPONENT" if s["trigger_alignment"] else "REFERENCE ONLY"
-                cat_label = s["category"].upper().replace("_", " ")
-                with cols[j]:
-                    st.markdown(f"""
-                    <div class="market-box">
-                        <div class="market-header">
-                            <span class="market-name">{s['icon']} {s['name']}</span>
-                            <span style="color:#888; font-size:0.75rem;">{s['market']} · {cat_label}</span>
-                        </div>
-                        <div class="price-row">
-                            <span class="price-value">{close:,.2f}</span>
-                            <span class="change-value {color_class}">{abs_v:+,.2f}</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:5px;">
-                            <span class="pct-value {color_class}" style="background:#f8f9fa; padding:2px 8px; border-radius:6px;">{arrow} {abs(pct):.2f}%</span>
-                            <span style="font-size:0.75rem; color:#999;">Prev: {prev:,.2f}</span>
-                        </div>
-                        <div style="margin-top:10px; font-size:0.65rem; color:#bbb; border-top:1px dashed #eee; padding-top:5px; text-align:center;">{strategy_tag}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+# ---- Nifty OI Flow ----
+if nifty_flow_result["rows"]:
+    st.subheader(f"{nifty_flow_result['title']} — Macro Score: {nifty_flow_result['score']:.2f}")
+    st.markdown("**Weighted Macro Score (-1 to +1)**: Based on absolute turnover and price change across top traded futures.")
+    indicator = "Bullish" if nifty_flow_result["score"] > 0 else ("Bearish" if nifty_flow_result["score"] < 0 else "Sideways")
+    st.write(f"Market Bias: {indicator}")
+    st.dataframe(pd.DataFrame(nifty_flow_result["rows"]))
+else:
+    st.info("No Nifty futures met the turnover threshold right now.")
