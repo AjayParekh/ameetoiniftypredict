@@ -147,7 +147,7 @@ st.markdown("""
     .rev-pill-yellow { background:#fff3cd; color:#856404; }
     .rev-pill-gray   { background:#e9ecef; color:#495057; }
     .rev-alert-item { padding: 8px 12px; border-radius: 8px; margin-bottom: 6px;
-        font-size: 0.86rem; border-left: 4px solid; }
+        font-size: 0.86rem; border-left: 4px solid; color: #000000; }
     .rev-alert-bear { background:#fdecea; border-color:#c62828; }
     .rev-alert-bull { background:#e8f5e9; border-color:#2e7d32; }
     .rev-alert-neutral { background:#f1f3f5; border-color:#6c757d; }
@@ -1507,7 +1507,8 @@ def rev_render_meter(params, change_oi_resp, oi_resp, spot_price):
         else:
             for a in reversed(alerts[-30:]):
                 cls = "rev-alert-bear" if "bear" in a["type"] else ("rev-alert-bull" if "bull" in a["type"] else "rev-alert-neutral")
-                st.markdown(f'<div class="rev-alert-item {cls}"><b>{a["ts"]}</b> — {a["msg"]}</div>',
+                # Added explicit color:#000000 inline to guarantee visibility in Dark Mode
+                st.markdown(f'<div class="rev-alert-item {cls}" style="color: #000000;"><b>{a["ts"]}</b> — {a["msg"]}</div>',
                             unsafe_allow_html=True)
 
     with st.expander("🧪 Quick backtest summary (recorded snapshots only)", expanded=False):
