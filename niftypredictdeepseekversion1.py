@@ -13,6 +13,7 @@ warnings.filterwarnings('ignore')
 import json
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+import smart_oi_layer as sol   # NEW: Phase 1 shadow layer (does not alter existing logic)
 
 # --- Reversal Meter: optional Plotly import ---
 try:
@@ -1544,20 +1545,43 @@ rev_params = {
     "cooldown_sec": rev_cooldown_min * 60,
 }
 
+# ---- NEW: Smart OI Layer Phase 1 (shadow mode) — display-only, never alters signals ----
+def _p1_tick(p1, c_oi, err, raw_spot):
+    try:
+        now_ = datetime.now(ist)
+        rep = sol.tick(p1, now_, spot_raw=raw_spot, change_oi_resp=c_oi,
+                       change_oi_error=err,
+                       rev_alerts=st.session_state.get("rev_alerts", []),
+                       snapshots=st.session_state.get("rev_snapshots", []),
+                       flip_dir=nifty_meter.get("flip"),
+                       flip_since=nifty_meter.get("flip_since"),
+                       flip_score=nifty_meter.get("score"))
+        with st.expander("🛰️ Smart OI Layer — Phase 1 (shadow)", expanded=False):
+            st.markdown(sol.freshness_html(rep, p1), unsafe_allow_html=True)
+    except Exception as e:
+        st.caption(f"Smart OI Layer (shadow) error: {e}")   # can never break the app
+
 # ---- Fragment: 5-second reversal sampler ----
 def _rev_fragment_body():
+    # NEW: Phase 1 shadow layer state (never touches existing logic)
+    if "smart_p1" not in st.session_state:
+        st.session_state.smart_p1 = sol.new_state()
+    _p1 = st.session_state.smart_p1
     try:
         c_oi = _sampled_change_oi('NSE_INDEX|Nifty 50', expiry_str, today_str)
     except Exception as e:
         st.error(f"Reversal meter: change-OI fetch failed — {e}")
+        _p1_tick(_p1, None, e, None)   # NEW
         return
     try:
         oi_r = _sampled_oi('NSE_INDEX|Nifty 50', expiry_str, today_str)
     except Exception:
         oi_r = None
     spot = _sampled_spot()
+    _raw_spot = spot                    # NEW: true fetched value, before the fallback below
     if not spot: spot = nifty_price
     rev_render_meter(rev_params, c_oi, oi_r, spot)
+    _p1_tick(_p1, c_oi, None, _raw_spot)   # NEW
 
 if _FRAGMENT_SUPPORTED:
     @_frag(run_every=5)
