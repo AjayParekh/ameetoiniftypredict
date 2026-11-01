@@ -15,9 +15,6 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import smart_oi_layer as sol   # NEW: Phase 1 shadow layer (does not alter existing logic)
 
-# NEW: Import the separate Chart & SMC module
-from nifty_smc_chart import render_nifty_price_bar, render_smc_section
-
 # --- Reversal Meter: optional Plotly import ---
 try:
     import plotly.graph_objects as go
@@ -1598,10 +1595,6 @@ else:
 # UI RENDER
 # ==============================
 st.title("🔮 Nifty Analytics & Strategy Suite — Pro")
-
-# NEW: Nifty Live Price Bar (Spot, Change, Change %)
-render_nifty_price_bar()
-
 entry_datetime = nifty_gate["time_label"]
 
 if divergence_detected:
@@ -1679,9 +1672,6 @@ else:
 if rev_enabled:
     _run_rev_fragment()
 
-# ===== NEW: Nifty Chart + SMC + Pure Change-in-OI (shadow mode) =====
-render_smc_section(expiry_str)
-
 # ---- Nifty OI Data ----
 reusable_display_oi_data(upstoxOiResponse, "Nifty Open Interest Data")
 reusable_display_oi_data(upstoxOiChangeResponse, "Nifty Change in OI")
@@ -1695,3 +1685,16 @@ if nifty_flow_result["rows"]:
     st.dataframe(pd.DataFrame(nifty_flow_result["rows"]))
 else:
     st.info("No Nifty futures met the turnover threshold right now.")
+	
+	
+	
+
+
+
+
+
+
+
+
+
+
