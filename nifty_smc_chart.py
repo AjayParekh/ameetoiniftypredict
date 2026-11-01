@@ -1,6 +1,6 @@
 """
 nifty_smc_chart.py — Standalone Nifty Chart + Smart Money Concepts + Pure Change-in-OI Meter.
-Optimized for maximum performance to prevent browser freezes on 1-minute charts.
+Includes Live Tick Injection for the most recent candle.
 """
 
 import streamlit as st
@@ -51,8 +51,9 @@ def _enc(key: str) -> str:
     return quote(key, safe="")
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=4, show_spinner=False)
 def _fetch_nifty_quote():
+    """Fetches live Nifty price for tick injection."""
     try:
         r = requests.get(
             "https://api.upstox.com/v2/market-quote/quotes",
@@ -71,12 +72,12 @@ def _fetch_nifty_quote():
             if prev is None and net is not None: prev = float(lp) - float(net)
             pct = (float(net) / float(prev) * 100) if (net is not None and prev) else 0.0
             return {"last": float(lp), "change": float(net or 0), "pct": float(pct), "prev_close": float(prev or 0)}
-    except Exception as e:
+    except Exception:
         pass
     return None
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def _fetch_intraday_v3(inst_key: str, unit: str, interval: str):
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{_enc(inst_key)}/{unit}/{interval}"
     try:
@@ -132,11 +133,11 @@ def _candles_to_df(candles):
     return df
 
 
-@st.cache_data(ttl=30, show_spinner="Fetching candles...")
+@st.cache_data(ttl=15, show_spinner="Fetching candles...")
 def fetch_candles(timeframe: str, lookback_days: int = 15):
     unit, interval = TIMEFRAMES[timeframe]
     
-    # AGGRESSIVE CAPPING: Prevent API timeouts and browser freezes
+    # CAP: 1-min chart only fetches last 2 days to prevent API & browser hang
     if interval == "1": lookback_days = min(lookback_days, 2)
     elif interval == "3": lookback_days = min(lookback_days, 5)
     elif interval == "5": lookback_days = min(lookback_days, 10)
@@ -389,7 +390,6 @@ def render_chart(df, swings, bos_choch, fvgs, obs, liq, sweeps, pdz, timeframe, 
     if sh: fig.add_trace(go.Scatter(x=[df["datetime"].iloc[i] for i in sh], y=[float(df["high"].iloc[i]) for i in sh], mode="markers", name="Swing High", marker=dict(symbol="triangle-down", size=9, color="#d32f2f")))
     if sl: fig.add_trace(go.Scatter(x=[df["datetime"].iloc[i] for i in sl], y=[float(df["low"].iloc[i]) for i in sl], mode="markers", name="Swing Low", marker=dict(symbol="triangle-up", size=9, color="#388e3c")))
 
-    # REDUCED SHAPES: Only draw the last 10 to prevent lag
     for f in fvgs[-10:]:
         color = "rgba(38,166,154,0.16)" if f["type"] == "bullish" else "rgba(239,83,80,0.16)"
         fig.add_shape(type="rect", x0=f["start_ts"], x1=df["datetime"].iloc[-1], y0=f["bottom"], y1=f["top"], fillcolor=color, line=dict(width=0), layer="below")
@@ -418,7 +418,6 @@ def render_chart(df, swings, bos_choch, fvgs, obs, liq, sweeps, pdz, timeframe, 
     fig.update_layout(title=f"{title} · {timeframe}", xaxis_rangeslider_visible=False, height=720, template="plotly_white", margin=dict(l=20, r=20, t=50, b=20), legend=dict(orientation="h", y=1.02, x=0), hovermode="x")
 
     if timeframe not in ("Daily",):
-        # SIMPLIFIED RANGEBREAKS: Removing night breaks prevents Plotly from freezing
         fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
 
     return fig
@@ -488,6 +487,19 @@ def render_smc_section(expiry_str=None):
     if df.empty:
         st.warning("No candle data available (market closed or API issue)."); return
 
+    # --- LIVE TICK INJECTION ---
+    # We take the live price and overwrite the latest candle to make it wiggle in real-time
+    q = _fetch_nifty_quote()
+    if q and not df.empty:
+        last_idx = df.index[-1]
+        live_price = q["last"]
+        
+        # Only update if the latest candle is from today
+        if df.at[last_idx, "datetime"].date() == datetime.now(IST).date():
+            df.at[last_idx, "close"] = live_price
+            df.at[last_idx, "high"] = max(df.at[last_idx, "high"], live_price)
+            df.at[last_idx, "low"] = min(df.at[last_idx, "low"], live_price)
+
     # HARD LIMIT: Keep only the most recent 500 candles to guarantee instant rendering
     max_candles = 500
     if len(df) > max_candles:
@@ -530,10 +542,9 @@ def render_smc_section(expiry_str=None):
         else: st.caption("No sweeps detected yet.")
 
     st.markdown("---")
-    q = _fetch_nifty_quote()
     spot = q["last"] if q else float(df["close"].iloc[-1])
     if expiry_str is None:
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
         expiry_str = _fetch_nearest_expiry(NIFTY_KEY, today_str) or today_str
     _render_pure_oi_panel(spot, expiry_str)
-    st.caption(f"🛰️ Shadow-mode observation only — nothing here touches the existing signals, gates, or alerts. Data: Upstox V3 candles · last refresh {datetime.now(IST).strftime('%H:%M:%S')} IST")
+    st.caption(f"🛰️ Shadow-mode observation only — nothing here touches the existing signals, gates, or alerts. Data: Upstox V3 candles + Live Tick · last refresh {datetime.now(IST).strftime('%H:%M:%S')} IST")
