@@ -1555,7 +1555,11 @@ def _p1_tick(p1, c_oi, err, raw_spot):
                        snapshots=st.session_state.get("rev_snapshots", []),
                        flip_dir=nifty_meter.get("flip"),
                        flip_since=nifty_meter.get("flip_since"),
-                       flip_score=nifty_meter.get("score"))
+                       flip_score=(nifty_meter.get("score") if nifty_meter.get("available") else None),
+                       score_hist=st.session_state.get("meter_hist_Nifty", []),   # NEW Phase 2 (read-only)
+                       flip_thr=meter_flip_threshold)                              # NEW Phase 2
+        with st.expander("🧠 Smart OI — Price Confirmation (Phase 2, shadow)", expanded=True):   # NEW Phase 2
+            st.markdown(sol.phase2_html(p1), unsafe_allow_html=True)
         with st.expander("🛰️ Smart OI Layer — Phase 1 (shadow)", expanded=False):
             st.markdown(sol.freshness_html(rep, p1), unsafe_allow_html=True)
     except Exception as e:
@@ -1685,16 +1689,3 @@ if nifty_flow_result["rows"]:
     st.dataframe(pd.DataFrame(nifty_flow_result["rows"]))
 else:
     st.info("No Nifty futures met the turnover threshold right now.")
-	
-	
-	
-
-
-
-
-
-
-
-
-
-
