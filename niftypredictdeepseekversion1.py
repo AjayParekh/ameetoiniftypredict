@@ -1545,7 +1545,22 @@ rev_params = {
     "cooldown_sec": rev_cooldown_min * 60,
 }
 
-# ---- NEW: Smart OI Layer Phase 1 (shadow mode) — display-only, never alters signals ----
+# ---- NEW: Smart OI Layer (shadow mode) — display-only, never alters signals ----
+def _p1_rev_scorer(sub):
+    # NEW: read-only call of YOUR existing reversal functions on a snapshot history.
+    an = _rev_detect_anomalies(sub, rev_params)
+    bs = _rev_bearish_score(sub, an)[0]
+    ls = _rev_bullish_score(sub, an)[0]
+    return an, bs, ls
+
+def _gh_cfg():
+    # NEW: permanent log settings come from Streamlit Secrets (never from the code)
+    try:
+        return {"token": st.secrets["GITHUB_LOG_TOKEN"], "repo": st.secrets["GITHUB_LOG_REPO"],
+                "branch": st.secrets.get("GITHUB_LOG_BRANCH", "")}
+    except Exception:
+        return None
+
 def _p1_tick(p1, c_oi, err, raw_spot):
     try:
         now_ = datetime.now(ist)
@@ -1556,9 +1571,13 @@ def _p1_tick(p1, c_oi, err, raw_spot):
                        flip_dir=nifty_meter.get("flip"),
                        flip_since=nifty_meter.get("flip_since"),
                        flip_score=(nifty_meter.get("score") if nifty_meter.get("available") else None),
-                       score_hist=st.session_state.get("meter_hist_Nifty", []),   # NEW Phase 2 (read-only)
-                       flip_thr=meter_flip_threshold)                              # NEW Phase 2
-        with st.expander("🧠 Smart OI — Price Confirmation (Phase 2, shadow)", expanded=True):   # NEW Phase 2
+                       score_hist=st.session_state.get("meter_hist_Nifty", []),
+                       flip_thr=meter_flip_threshold,
+                       rev_scorer=_p1_rev_scorer,      # NEW Phase 3
+                       gh_cfg=_gh_cfg())               # NEW permanent log
+        with st.expander("🔄 Smart OI — Reversal Confirmation (Phase 3, shadow)", expanded=True):   # NEW Phase 3
+            st.markdown(sol.phase3_html(p1, now_), unsafe_allow_html=True)
+        with st.expander("🧠 Smart OI — Price Confirmation (Phase 2, shadow)", expanded=True):
             st.markdown(sol.phase2_html(p1), unsafe_allow_html=True)
         with st.expander("🛰️ Smart OI Layer — Phase 1 (shadow)", expanded=False):
             st.markdown(sol.freshness_html(rep, p1), unsafe_allow_html=True)
