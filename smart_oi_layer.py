@@ -21,7 +21,8 @@ SPOT_KEEP_SEC = 5400                      # keep 90 min of spot samples
 STALE_AFTER = {"spot": 20, "oi": 30, "premium": 30}   # seconds since last SUCCESS
 HORIZONS = (5, 10, 15)                    # minutes
 OUTCOME_TOLERANCE_SEC = 90                # outcome sample must be within 90 s AFTER target
-ALERT_SPOT_MAX_BACK_SEC = 15              # spot-at-alert must be <=15 s before alert
+ALERT_SPOT_MAX_BACK_SEC = 15              # (kept for compatibility)
+ALERT_SPOT_NEAR_SEC = 15                  # spot-at-alert = closest recorded sample within +-15 s
 PENDING_MAX_AGE_MIN = 20
 
 
@@ -165,6 +166,16 @@ def spot_at_or_before(buf, ts, max_back_sec=ALERT_SPOT_MAX_BACK_SEC):
     return best
 
 
+def spot_near(buf, ts, tol_sec=ALERT_SPOT_NEAR_SEC):
+    """Closest recorded sample to the alert time (before OR just after), within tol_sec."""
+    best, bd = None, None
+    for s_ in buf:
+        d = abs((s_["ts"] - ts).total_seconds())
+        if d <= tol_sec and (bd is None or d < bd):
+            best, bd = s_, d
+    return best
+
+
 def spot_first_at_or_after(buf, ts):
     for s in buf:
         if s["ts"] >= ts:
@@ -190,6 +201,7 @@ def _p3_summary(evs):
     pos = [e.get("stage") for e in evs if e.get("stage") in STAGE_RANK]
     peak = max(pos, key=lambda x: STAGE_RANK[x]) if pos else None
     inval = next((e.get("ts") for e in evs if e.get("status") == "INVALIDATED"), None)
+    confirmed = next((e.get("ts") for e in evs if e.get("stage") == "CONFIRMED REVERSAL CANDIDATE"), None)
     ids = []
     for e in evs:
         for a in (e.get("alert_ids") or []):
@@ -200,7 +212,9 @@ def _p3_summary(evs):
             "p3_final_status": last.get("status"),
             "p3_max_confirm": max((e.get("confirm") or 0) for e in evs),
             "p3_n_valid": max((e.get("n_valid") or 0) for e in evs),
-            "p3_invalidated_at": inval, "p3_alert_ids": ";".join(ids)}
+            "p3_invalidated_at": inval, "p3_confirmed_at": confirmed,
+            "p3_max_adverse_pts": last.get("mae"), "p3_max_favorable_pts": last.get("mfe"),
+            "p3_alert_ids": ";".join(ids)}
 
 
 def load_log(path):
@@ -298,7 +312,7 @@ def sync_alerts(state, now, rev_alerts, snapshots, flip_dir, flip_since, flip_sc
             ts = _localize(datetime.strptime(a["ts"], "%Y-%m-%d %H:%M:%S"), now)
         except (KeyError, ValueError):
             continue
-        sp = spot_at_or_before(state["spot_buf"], ts)
+        sp = spot_near(state["spot_buf"], ts)
         snap = _latest_snapshot_before(snapshots, ts)
         _log_alert(state, path, now, {
             "type": "alert", "id": aid, "ts": ts.isoformat(),
@@ -313,7 +327,7 @@ def sync_alerts(state, now, rev_alerts, snapshots, flip_dir, flip_since, flip_sc
         fid = f"{flip_since.strftime('%Y-%m-%d %H:%M:%S')}|flip_{flip_dir}"
         if fid not in state["seen_ids"]:
             state["seen_ids"].add(fid)
-            sp = spot_at_or_before(state["spot_buf"], flip_since)
+            sp = spot_near(state["spot_buf"], flip_since)
             _log_alert(state, path, now, {
                 "type": "alert", "id": fid, "ts": flip_since.isoformat(),
                 "source": "original_flip", "direction": flip_dir,
@@ -650,6 +664,52 @@ def classify(bias, pdir, reliable, reason):
     return "NEUTRAL", "NO CLEAR OI BIAS AND NO STRONG PRICE MOVE"
 
 
+SW60_WINDOW_MIN = 60
+SW60_MIN_CANDLES = 30          # of the last 60 one-minute candles
+SW60_EFFICIENCY_MAX = 0.35
+SW60_RANGE_PCT_MAX = 0.35
+SW60_ALERT_WINDOW_MIN = 90
+SW60_ALERTS_MIN = 3            # Reversal-Meter alerts in 90 min, both directions = churn
+SW60_MIN_FACTORS = 2           # of 3
+
+
+def _alerts_in_window(rev_alerts, now, minutes):
+    out = []
+    for a in (rev_alerts or []):
+        try:
+            ts = _localize(datetime.strptime(a["ts"], "%Y-%m-%d %H:%M:%S"), now)
+        except (KeyError, ValueError, TypeError):
+            continue
+        if 0 <= (now - ts).total_seconds() <= minutes * 60:
+            out.append((ts, _direction_from_type(a.get("type"))))
+    return out
+
+
+def range_filter_60(candles, rev_alerts, now):
+    """Longer-horizon chop detector: catches days that look directional in any 20-min
+    window but keep reversing. Needs 30+ valid minutes; otherwise says so."""
+    alerts = _alerts_in_window(rev_alerts, now, SW60_ALERT_WINDOW_MIN)
+    dirs = {d for _, d in alerts if d != "UNKNOWN"}
+    churn = len(alerts) >= SW60_ALERTS_MIN and len(dirs) >= 2
+    res = {"status": "INSUFFICIENT", "valid": len(candles), "factors": [],
+           "alerts_90": len(alerts), "churn": churn}
+    if len(candles) < SW60_MIN_CANDLES:
+        return res
+    hi, lo = max(c["high"] for c in candles), min(c["low"] for c in candles)
+    rng = hi - lo
+    rng_pct = rng / ((hi + lo) / 2) * 100
+    eff = abs(candles[-1]["close"] - candles[0]["open"]) / rng if rng > 0 else 0.0
+    factors = [
+        (f"60-min directional efficiency {eff:.2f}", eff < SW60_EFFICIENCY_MAX),
+        (f"60-min range {rng:.0f} pts ({rng_pct:.2f}%)", rng_pct < SW60_RANGE_PCT_MAX),
+        (f"{len(alerts)} Reversal-Meter alert(s) in last {SW60_ALERT_WINDOW_MIN} min, both directions", churn),
+    ]
+    n = sum(1 for _, ok in factors if ok)
+    res.update({"status": "RANGE-BOUND" if n >= SW60_MIN_FACTORS else "NOT RANGE-BOUND",
+                "factors": factors, "true_count": n})
+    return res
+
+
 def compute_phase2(state, now, rev_alerts, score_hist, flip_thr, report):
     mv = price_moves(state, now)
     pdir = price_direction(mv["pct"]) if mv["cur"] is not None else \
@@ -662,12 +722,20 @@ def compute_phase2(state, now, rev_alerts, score_hist, flip_thr, report):
     candles = build_candles(state["spot_buf"], now, SIDEWAYS_WINDOW_MIN)
     struct = structure_levels(candles, now, mv["cur"])
     sw = sideways_filter(candles, rev_alerts, now)
+    sw60 = range_filter_60(build_candles(state["spot_buf"], now, SW60_WINDOW_MIN), rev_alerts, now)
+    if sw["status"] == "SIDEWAYS" or sw60["status"] == "RANGE-BOUND":
+        combined = "SIDEWAYS"
+    elif sw["status"] == "INSUFFICIENT":
+        combined = "INSUFFICIENT"
+    else:
+        combined = sw["status"]
     color, label = classify(bias, pdir, report["reliable"], report["reason"])
     return {"color": color, "label": label, "bias": bias, "score": tr["score"],
             "score_delta": tr["delta"], "fading": fading, "price": mv["cur"],
             "moves": mv["moves"], "pct": mv["pct"], "price_dir": pdir["direction"],
-            "strong": pdir["strong"], "structure": struct, "sideways_status": sw["status"],
-            "sideways": sw, "candles": len(candles), "reason": report["reason"]}
+            "strong": pdir["strong"], "structure": struct, "sideways_status": combined,
+            "sideways": sw, "sideways60": sw60, "market_open": report["market_open"],
+            "candles": len(candles), "reason": report["reason"]}
 
 
 def _mv_txt(mv, pct):
@@ -681,6 +749,12 @@ def phase2_html(state):
     color = COLORS.get(p2["color"], "#6e7781")
     if p2.get("error"):
         return (f'<div class="greeks-panel" style="border-left-color:{color};"><b>🧠 {p2["label"]}</b></div>')
+    foot = ('<div style="margin-top:6px; font-size:0.75rem; color:#555;">Shadow mode — informational only. '
+            'Does not change the OI score or any BUY/SELL signal.</div>')
+    if not p2.get("market_open", True):
+        return (f'<div class="greeks-panel" style="border-left-color:{color};">'
+                f'<b>🧠 {p2["color"]} · {p2["label"]}</b>'
+                f'<div style="margin-top:6px; font-size:0.85rem;">Price checks are paused while the market is closed.</div>{foot}</div>')
     rows = []
     sc = p2["score"]
     sc_txt = f"{sc:+.0f}" if sc is not None else "—"
@@ -705,42 +779,53 @@ def phase2_html(state):
             rows.append(f"<div>Structure: spot is BELOW the 15-min low ({stc['lo']:,.1f})</div>")
         else:
             rows.append(f"<div>Structure: inside 15-min range {stc['lo']:,.1f} – {stc['hi']:,.1f}</div>")
+    if p2["sideways_status"] == "SIDEWAYS":
+        rows.append('<div style="color:#c62828;"><b>⚠️ LOW DIRECTIONAL CONFIDENCE — SIDEWAYS CONDITIONS.</b></div>')
+    small = "font-size:0.78rem; color:#555;"
     sw = p2["sideways"]
     if sw["status"] == "INSUFFICIENT":
-        rows.append(f"<div>Sideways check: collecting candles ({sw['valid']}/{MIN_VALID_CANDLES} valid)</div>")
+        rows.append(f"<div>20-min sideways check: collecting candles ({sw['valid']}/{MIN_VALID_CANDLES} valid)</div>")
     else:
-        mark = "".join(f"<div style='font-size:0.78rem; color:#555;'>{'●' if ok else '○'} {t}</div>"
-                       for t, ok in sw["factors"])
-        warn = ('<div style="color:#c62828;"><b>⚠️ LOW DIRECTIONAL CONFIDENCE — SIDEWAYS CONDITIONS.</b></div>'
-                if sw["status"] == "SIDEWAYS" else "")
-        rows.append(f"<div>Sideways check: <b>{sw['status']}</b> ({sw['true_count']}/5 factors)</div>{warn}{mark}")
+        rows.append(f"<div>20-min sideways check: <b>{sw['status']}</b> ({sw['true_count']}/5 factors)</div>"
+                    + "".join(f"<div style='{small}'>{'●' if ok else '○'} {t}</div>" for t, ok in sw["factors"]))
+    s60 = p2.get("sideways60") or {}
+    if s60.get("status") == "INSUFFICIENT":
+        rows.append(f"<div>60-min range check: collecting candles ({s60.get('valid', 0)}/{SW60_MIN_CANDLES} valid) · "
+                    f"{s60.get('alerts_90', 0)} alert(s) in last {SW60_ALERT_WINDOW_MIN} min</div>")
+    elif s60:
+        warn = ('<div style="color:#c62828;"><b>⚠️ RANGE-BOUND (60 MIN) — REPEATED REVERSALS ARE LOW CONFIDENCE.</b></div>'
+                if s60["status"] == "RANGE-BOUND" else "")
+        rows.append(f"<div>60-min range check: <b>{s60['status']}</b> ({s60['true_count']}/3 factors)</div>{warn}"
+                    + "".join(f"<div style='{small}'>{'●' if ok else '○'} {t}</div>" for t, ok in s60["factors"]))
     return (f'<div class="greeks-panel" style="border-left-color:{color};">'
             f'<b>🧠 {p2["color"]} · {p2["label"]}</b>'
-            f'<div style="margin-top:6px; font-size:0.85rem;">{"".join(rows)}</div>'
-            f'<div style="margin-top:6px; font-size:0.75rem; color:#555;">Shadow mode — informational only. '
-            f'Does not change the OI score or any BUY/SELL signal.</div></div>')
+            f'<div style="margin-top:6px; font-size:0.85rem;">{"".join(rows)}</div>{foot}</div>')
 
 
 # =====================================================================
-# PHASE 3 — Reversal confirmation stages, false-reversal warnings,
-#           invalidation, alert classification (Modules 2 + 5)
+# PHASE 3 (v2) — Reversal confirmation: every alert is WATCHED for 15 minutes
+# and judged by what price does. The OI spike fading no longer ends the watch
+# (the original meter's anomalies are one-shot by design).
+#   CONFIRMED   price agreed (>=3 of 5 tests) and did not invalidate
+#   FADED       was confirmed, then confirmation weakened before the window ended
+#   INVALIDATED Nifty moved against the alert and stayed there
+#   EXPIRED     15 minutes passed without price confirmation
 # Reads your existing reversal scores through a callback. Never changes them.
 # =====================================================================
 P3_VALID_SCORE = 60            # same bar your Reversal Meter uses for an alert
-P3_SUSTAINED_N = 3             # consecutive fresh, distinct OI samples for "Sustained"
-P3_CONFIRM_MIN = 3             # price tests (of 5) needed for "Confirmed Candidate"
+P3_WATCH_MIN = 15              # every alert is watched this long
+P3_CONFIRM_MIN = 3             # price tests (of 5) needed to confirm
+P3_CONFIRM_MIN_AGE_SEC = 120   # cannot confirm in the first 2 minutes
 P3_MAX_SNAP_AGE_SEC = 30       # an OI sample older than this at processing time is skipped
-P3_MAX_GAP_SEC = 900           # longer gap between valid samples restarts the count
-P3_EXPIRE_MIN = 20             # no valid OI sample for this long -> setup ENDED
-P3_REC_PCT = 0.03              # spot must move >=0.03% in the setup direction ("recovery")
-P3_INVALID_PCT = 0.08          # opposite move (~19 pts at 23,500) ...
+P3_REC_PCT = 0.03              # spot must move >=0.03% in the alert direction ("recovery")
+P3_INVALID_PCT = 0.08          # opposite move (~19 pts at 23,800) ...
 P3_INVAL_HOLD_SEC = 30         # ... held this long = INVALIDATED
 P3_WARN_ADVERSE_FRAC = 0.5     # half of the invalidation move = warning
 P3_OPPOSITE_WINDOW_MIN = 10
 P3_OI_SUPPORT_MIN = 5.0        # OI Flip score must lean the same way by at least this
 P3_WEAKEN_DROP = 2             # confirmations dropping by this much = losing strength
 P3_KEEP_SETUPS = 60
-P3_CLOSED_SHOW_MIN = 15        # closed (invalidated/ended) cards stay visible this long
+P3_CLOSED_SHOW_MIN = 15        # closed cards stay visible this long
 
 POS_STAGES = ["INITIAL DETECTION", "DEVELOPING REVERSAL", "SUSTAINED REVERSAL",
               "CONFIRMED REVERSAL CANDIDATE"]
@@ -818,24 +903,34 @@ def _p3_price_tests(setup, cur, mv, candles, p2):
 
 
 def _p3_log_event(state, path, now, s):
-    key = (s["stage"], s["status"], s["color"], s["count"], s["n_valid"], len(s["alert_ids"]))
+    key = (s["stage"], s["status"], s["color"], s["count"], s["run_max"],
+           len(s["alert_ids"]), bool(s["confirmed_at"]))
     if s["logged_key"] == key:
         return
     s["logged_key"] = key
     _append(state, path, {"type": "p3", "id": s["id"], "ts": now.isoformat(), "stage": s["stage"],
                           "status": s["status"], "color": s["color"], "confirm": s["count"],
-                          "n_valid": s["n_valid"], "alert_ids": list(s["alert_ids"]),
-                          "warnings": list(s["warnings"])[:4]})
+                          "n_valid": s["run_max"], "alert_ids": list(s["alert_ids"]),
+                          "warnings": list(s["warnings"])[:4],
+                          "mae": round(s["mae"], 1), "mfe": round(s["mfe"], 1)})
+
+
+_CLOSE = {"INVALIDATED": ("INVALIDATED", "RED", "INVALIDATED — OPPOSITE PRICE MOVEMENT."),
+          "CONFIRMED": ("CONFIRMED REVERSAL CANDIDATE", "GREEN",
+                        "CONFIRMED — price agreed with the alert within the watch window."),
+          "FADED": ("REVERSAL LOSING STRENGTH", "ORANGE",
+                    "REVERSAL LOSING STRENGTH — confirmation faded before the window ended."),
+          "EXPIRED": ("EXPIRED", "NEUTRAL", "EXPIRED — no price confirmation within the watch window.")}
 
 
 def _p3_close(state, now, s, status, path):
     p3 = state["p3"]
-    s["status"], s["stage"], s["closed_at"] = status, status, now
+    if status == "CONFIRMED" and s.get("losing"):
+        status = "FADED"
+    s["status"], s["closed_at"] = status, now
+    s["stage"], s["color"], s["label"] = _CLOSE[status]
     if status == "INVALIDATED":
-        s["color"], s["label"] = "RED", "INVALIDATED — OPPOSITE PRICE MOVEMENT."
         s["invalidated_at"] = now
-    else:
-        s["color"], s["label"] = "NEUTRAL", "ENDED — OI reversal condition no longer present."
     if p3["active"].get(s["dir"]) == s["id"]:
         p3["active"][s["dir"]] = None
     _p3_log_event(state, path, now, s)
@@ -846,14 +941,17 @@ def _p3_start(state, now, direction, snap, score, an, cur, p2, path):
     sid = f"{snap['ts'].strftime('%Y-%m-%d %H:%M:%S')}|p3_{direction}"
     if sid in p3["setups"]:
         return p3["setups"][sid]
-    s = {"id": sid, "dir": direction, "start_ts": snap["ts"], "start_spot": cur, "n_valid": 1,
-         "last_valid_ts": snap["ts"], "fail_streak": 0, "peak_score": score, "last_score": score,
-         "stage": "INITIAL DETECTION", "status": "ACTIVE", "color": "YELLOW", "peak_stage": "INITIAL DETECTION",
+    s = {"id": sid, "dir": direction, "start_ts": snap["ts"], "start_spot": cur,
+         "run": 1, "run_max": 1, "fail_streak": 0, "oi_faded": False, "samples": 1,
+         "peak_score": score, "last_score": score,
+         "stage": "INITIAL DETECTION", "status": "ACTIVE", "color": "YELLOW",
+         "peak_stage": "INITIAL DETECTION",
          "ce": snap.get("ce"), "pe": snap.get("pe"), "oi_reason": "; ".join((an.get("reasons") or [])[:2]),
-         "conflict": False, "opp_flag": False, "temporary": False, "alert_ids": [], "max_confirm": 0,
-         "count": 0, "evaluable": 0, "tests": [], "warnings": [], "inval_since": None, "closed_at": None,
-         "invalidated_at": None, "label": "INITIAL DETECTION — OI reversal seen, awaiting confirmation",
-         "reason": "", "logged_key": None, "samples": 1, "stale": False, "cur": cur, "adverse": 0.0}
+         "conflict": False, "opp_flag": False, "alert_ids": [], "max_confirm": 0,
+         "count": 0, "evaluable": 0, "tests": [], "warnings": [], "inval_since": None,
+         "closed_at": None, "invalidated_at": None, "confirmed_at": None, "losing": False,
+         "mae": 0.0, "mfe": 0.0, "label": "INITIAL DETECTION — OI reversal seen, awaiting price confirmation",
+         "reason": "", "logged_key": None, "stale": False, "cur": cur, "adverse": 0.0}
     p3["setups"][sid] = s
     p3["order"].append(sid)
     p3["active"][direction] = sid
@@ -873,6 +971,7 @@ def _p3_start(state, now, direction, snap, score, an, cur, p2, path):
 
 
 def _p3_on_snapshot(state, now, snap, an, bs, ls, cur, p2, path):
+    """A new fresh OI sample. It can start or extend a watch; a faded spike never ends one."""
     p3 = state["p3"]
     conflict = bool((an.get("ce_build") and an.get("pe_build")) or
                     (an.get("ce_unwind") and an.get("pe_unwind")))
@@ -888,11 +987,10 @@ def _p3_on_snapshot(state, now, snap, an, bs, ls, cur, p2, path):
                     continue
                 s = _p3_start(state, now, direction, snap, score, an, cur, p2, path)
             else:
-                gap = (snap["ts"] - s["last_valid_ts"]).total_seconds()
-                s["n_valid"] = 1 if (s["fail_streak"] > 0 or gap > P3_MAX_GAP_SEC) else s["n_valid"] + 1
+                s["run"] = s["run"] + 1 if s["fail_streak"] == 0 else 1
                 s["fail_streak"] = 0
-                s["last_valid_ts"] = snap["ts"]
                 s["samples"] += 1
+            s["run_max"] = max(s["run_max"], s["run"])
             s.update(last_score=score, ce=snap.get("ce"), pe=snap.get("pe"), conflict=conflict,
                      oi_reason="; ".join((an.get("reasons") or [])[:2]))
             s["peak_score"] = max(s["peak_score"], score)
@@ -903,11 +1001,8 @@ def _p3_on_snapshot(state, now, snap, an, bs, ls, cur, p2, path):
                     o["opp_flag"] = True
         elif s is not None and s["status"] == "ACTIVE":
             s["fail_streak"] += 1
+            s["run"], s["oi_faded"] = 0, True
             s["last_score"], s["conflict"] = score, conflict
-            if s["samples"] <= 3 and s["fail_streak"] == 1:
-                s["temporary"] = True
-            if s["fail_streak"] >= 2:
-                _p3_close(state, now, s, "ENDED", path)
 
 
 def _p3_link_alerts(s, rev_alerts):
@@ -930,10 +1025,11 @@ def _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path):
     for sid in [x for x in p3["active"].values() if x]:
         s = p3["setups"][sid]
         _p3_link_alerts(s, rev_alerts)
-        if (now - s["last_valid_ts"]).total_seconds() > P3_EXPIRE_MIN * 60:
-            _p3_close(state, now, s, "ENDED", path)
+        age = (now - s["start_ts"]).total_seconds()
+        if age >= P3_WATCH_MIN * 60:                       # watch window over -> final verdict
+            _p3_close(state, now, s, "CONFIRMED" if s["confirmed_at"] else "EXPIRED", path)
             continue
-        if not report["reliable"] or cur is None:       # never confirm / invalidate on stale data
+        if not report["reliable"] or cur is None:          # never confirm / invalidate on stale data
             s["stale"], s["color"] = True, "GREY"
             s["label"] = "INSUFFICIENT DATA — " + (report["reason"] if not report["reliable"] else "no fresh spot")
             continue
@@ -944,7 +1040,9 @@ def _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path):
         s["count"] = sum(1 for _, ok, _ in tests if ok is True)
         s["evaluable"] = sum(1 for _, ok, _ in tests if ok is not None)
         s["max_confirm"] = max(s["max_confirm"], s["count"])
-        adverse = -d * (cur - s["start_spot"]) / s["start_spot"] * 100
+        move_pts = d * (cur - s["start_spot"])
+        s["mfe"], s["mae"] = max(s["mfe"], move_pts), max(s["mae"], -move_pts)
+        adverse = -move_pts / s["start_spot"] * 100
         s["adverse"] = adverse
         if adverse >= P3_INVALID_PCT:
             s["inval_since"] = s["inval_since"] or now
@@ -953,14 +1051,18 @@ def _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path):
                 continue
         else:
             s["inval_since"] = None
-        weaken = (s["max_confirm"] - s["count"]) >= P3_WEAKEN_DROP and s["n_valid"] >= 2
-        if s["fail_streak"] >= 1 or weaken:
+        if s["confirmed_at"] is None and s["count"] >= P3_CONFIRM_MIN and age >= P3_CONFIRM_MIN_AGE_SEC:
+            s["confirmed_at"] = now
+        near_invalid = adverse >= P3_INVALID_PCT * P3_WARN_ADVERSE_FRAC
+        s["losing"] = bool(((s["max_confirm"] - s["count"]) >= P3_WEAKEN_DROP and s["max_confirm"] >= 2)
+                           or near_invalid)
+        if s["losing"]:
             stage = "REVERSAL LOSING STRENGTH"
-        elif s["n_valid"] >= P3_SUSTAINED_N and s["count"] >= P3_CONFIRM_MIN:
+        elif s["confirmed_at"]:
             stage = "CONFIRMED REVERSAL CANDIDATE"
-        elif s["n_valid"] >= P3_SUSTAINED_N:
+        elif s["run_max"] >= 3:
             stage = "SUSTAINED REVERSAL"
-        elif s["n_valid"] == 2:
+        elif s["run_max"] == 2:
             stage = "DEVELOPING REVERSAL"
         else:
             stage = "INITIAL DETECTION"
@@ -969,7 +1071,7 @@ def _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path):
             s["peak_stage"] = stage
         sideways = (p2 or {}).get("sideways_status") == "SIDEWAYS"
         warns = []
-        if (now - s["start_ts"]).total_seconds() >= 180 and s["evaluable"] >= 3 and s["count"] <= 1:
+        if age >= 180 and s["evaluable"] >= 3 and s["count"] <= 1:
             warns.append("OI changed but price is NOT confirming")
         if s["opp_flag"]:
             warns.append("OI flipped direction shortly after this alert")
@@ -977,25 +1079,25 @@ def _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path):
             warns.append("Call and Put OI show conflicting behaviour")
         if sideways:
             warns.append("LOW DIRECTIONAL CONFIDENCE — SIDEWAYS CONDITIONS.")
-        if s["temporary"]:
+        if s["oi_faded"] and s["count"] < P3_CONFIRM_MIN and age >= 180:
             warns.append("OI movement looks temporary")
-        if adverse >= P3_INVALID_PCT * P3_WARN_ADVERSE_FRAC:
-            warns.append(f"Spot is moving against this setup ({adverse * s['start_spot'] / 100:.0f} pts)")
+        if near_invalid:
+            warns.append(f"Spot is moving against this setup ({-move_pts:.0f} pts)")
         s["warnings"] = warns
-        if stage == "REVERSAL LOSING STRENGTH":
-            s["color"], s["label"] = "ORANGE", "REVERSAL LOSING STRENGTH."
-        elif adverse >= P3_INVALID_PCT * P3_WARN_ADVERSE_FRAC:
-            s["color"], s["label"] = "ORANGE", f"{stage} — PRICE DISAGREES WITH OI"
+        if s["losing"]:
+            s["color"] = "ORANGE"
+            s["label"] = ("REVERSAL LOSING STRENGTH — PRICE MOVING AGAINST THE ALERT." if near_invalid
+                          else "REVERSAL LOSING STRENGTH.")
         elif stage == "CONFIRMED REVERSAL CANDIDATE":
             s["color"] = "YELLOW" if sideways else "GREEN"
-            s["label"] = stage + (" (sideways — treat with caution)" if sideways else " — OI AND PRICE AGREE")
+            s["label"] = stage + (" (sideways — treat with caution)" if sideways else " — PRICE AGREES WITH THE ALERT")
         else:
             s["color"] = "YELLOW"
-            s["label"] = {"INITIAL DETECTION": "INITIAL DETECTION — OI reversal seen, awaiting confirmation",
-                          "DEVELOPING REVERSAL": "DEVELOPING REVERSAL — 2 consecutive OI samples",
+            s["label"] = {"INITIAL DETECTION": "INITIAL DETECTION — awaiting price confirmation",
+                          "DEVELOPING REVERSAL": "DEVELOPING REVERSAL — OI repeated, awaiting price confirmation",
                           "SUSTAINED REVERSAL": f"SUSTAINED REVERSAL — price confirmation {s['count']}/{P3_CONFIRM_MIN} needed"}[stage]
-        s["reason"] = (f"{s['n_valid']} consecutive fresh OI sample(s) with reversal score ≥ {P3_VALID_SCORE}; "
-                       f"price tests {s['count']}/{s['evaluable']} passing")
+        s["reason"] = (f"Watching {age / 60:.0f}/{P3_WATCH_MIN} min · best run of OI samples {s['run_max']} · "
+                       f"price tests {s['count']}/{s['evaluable']} passing (need {P3_CONFIRM_MIN})")
         _p3_log_event(state, path, now, s)
 
 
@@ -1024,23 +1126,26 @@ def p3_update(state, now, report, p2, snapshots, rev_scorer, rev_alerts, path):
     _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path)
 
 
-def _p3_card(s):
+def _p3_card(s, now):
     color = COLORS.get(s["color"], "#6e7781")
     closed = s["status"] != "ACTIVE"
     tick_ = {True: "✅", False: "❌", None: "⚪"}
     tests = " · ".join(f"{tick_[ok]} {n}" for n, ok, _ in s["tests"]) if s["tests"] else "not evaluated yet"
     mv_txt = f"{s['cur'] - s['start_spot']:+.1f} pts" if s.get("cur") else "—"
     warn = "".join(f"<div style='color:#c62828;'>⚠️ {w}</div>" for w in s["warnings"] if not closed)
+    when = (f"closed — worst move against {s['mae']:.0f} pts, best move for {s['mfe']:.0f} pts" if closed else
+            f"watching {min(P3_WATCH_MIN, (now - s['start_ts']).total_seconds() / 60):.0f}/{P3_WATCH_MIN} min")
+    faded = (" · OI spike has faded (normal — judged on price)" if s["oi_faded"] and not closed else "")
     return (f'<div class="greeks-panel" style="border-left-color:{color}; margin-bottom:8px;">'
-            f'<b>{s["color"]} · {s["dir"]} REVERSAL — {s["label"]}</b>{" (closed)" if closed else ""}'
+            f'<b>{s["color"]} · {s["dir"]} REVERSAL — {s["label"]}</b>'
             f'<div style="margin-top:6px; font-size:0.85rem;">'
             f'<div>Alert time: <b>{s["start_ts"].strftime("%H:%M:%S")}</b> · Nifty at alert {s["start_spot"]:,.1f} · '
-            f'linked Reversal-Meter alerts: {len(s["alert_ids"])}</div>'
+            f'{when} · linked Reversal-Meter alerts: {len(s["alert_ids"])}</div>'
             f'<div>OI behaviour: reversal score <b>{s["last_score"]:.0f}</b> (peak {s["peak_score"]:.0f}) · '
-            f'CE ΔOI {_fmt_oi(s["ce"])} · PE ΔOI {_fmt_oi(s["pe"])}'
+            f'CE ΔOI {_fmt_oi(s["ce"])} · PE ΔOI {_fmt_oi(s["pe"])}{faded}'
             f'{" · " + s["oi_reason"] if s["oi_reason"] else ""}</div>'
             f'<div>Nifty behaviour since alert: <b>{mv_txt}</b></div>'
-            f'<div>Confirmation: <b>{s["count"]}/{s["evaluable"]}</b> evaluable (need {P3_CONFIRM_MIN}) — {tests}</div>'
+            f'<div>Price confirmation: <b>{s["count"]}/{s["evaluable"]}</b> evaluable (need {P3_CONFIRM_MIN}) — {tests}</div>'
             f'<div style="color:#555;">{s["reason"]}</div>{warn}</div></div>')
 
 
@@ -1052,15 +1157,20 @@ def phase3_html(state, now):
     if not p3 or not p3["order"]:
         return ('<div class="greeks-panel" style="border-left-color:#6e7781;">'
                 '<b>🔄 No reversal setups yet this session.</b><div style="font-size:0.8rem; color:#555;">'
-                'A setup starts when your Reversal Meter conditions are met on fresh, new OI data. '
+                f'Every alert from your Reversal Meter is watched for {P3_WATCH_MIN} minutes and judged on price. '
                 'Shadow mode — informational only.</div></div>')
     rep = state.get("last_report")
+    setups = [p3["setups"][x] for x in p3["order"]]
+    tally = {k: sum(1 for x in setups if x["status"] == k)
+             for k in ("ACTIVE", "CONFIRMED", "FADED", "INVALIDATED", "EXPIRED")}
+    score = (f'<div style="font-size:0.85rem; margin-bottom:6px;"><b>This session:</b> {len(setups)} alert(s) watched · '
+             f'{tally["CONFIRMED"]} confirmed · {tally["FADED"]} faded · {tally["INVALIDATED"]} invalidated · '
+             f'{tally["EXPIRED"]} expired without confirmation · {tally["ACTIVE"]} still being watched</div>')
     cards, shown = [], 0
-    for sid in reversed(p3["order"]):
-        s = p3["setups"][sid]
+    for s in reversed(setups):
         recent_closed = s["closed_at"] is not None and (now - s["closed_at"]).total_seconds() <= P3_CLOSED_SHOW_MIN * 60
         if s["status"] == "ACTIVE" or recent_closed:
-            cards.append(_p3_card(s))
+            cards.append(_p3_card(s, now))
             shown += 1
         if shown >= 3:
             break
@@ -1071,11 +1181,11 @@ def phase3_html(state, now):
         fresh = (f'<div style="font-size:0.78rem; color:#555;">Data freshness: spot {sp["status"]} ({age(sp)}) · '
                  f'OI {oi["status"]} ({age(oi)}) · samples skipped as stale/duplicate: {p3["skipped"]}</div>')
     hist = "".join(
-        f"<div style='font-size:0.78rem;'>{p3['setups'][x]['start_ts'].strftime('%H:%M')} · "
-        f"{p3['setups'][x]['dir']} · peak {p3['setups'][x]['peak_stage']} → "
-        f"<b>{p3['setups'][x]['stage']}</b> · best confirmation {p3['setups'][x]['max_confirm']}/5</div>"
-        for x in list(reversed(p3["order"]))[:8])
-    return ("".join(cards) + fresh +
+        f"<div style='font-size:0.78rem;'>{x['start_ts'].strftime('%H:%M')} · {x['dir']} · "
+        f"<b>{x['status']}</b> · price tests best {x['max_confirm']}/5 · "
+        f"worst move against {x['mae']:.0f} pts, best for {x['mfe']:.0f} pts</div>"
+        for x in reversed(setups[-8:]))
+    return (score + "".join(cards) + fresh +
             f'<div style="margin-top:6px;"><b style="font-size:0.8rem;">History (kept, never deleted)</b>{hist}</div>'
             '<div style="font-size:0.75rem; color:#555; margin-top:4px;">Shadow mode — informational only. '
             'Does not change your Reversal Meter, alerts or BUY/SELL signals.</div>')
