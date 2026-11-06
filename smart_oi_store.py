@@ -25,7 +25,8 @@ COLUMNS = [
     "p2_label", "p2_price_dir", "p2_sideways", "p2_oi_bias", "data_reliable",
     "price_5m", "price_10m", "price_15m", "hit_5m", "hit_10m", "hit_15m",
     "p3_setup_id", "p3_peak_stage", "p3_final_stage", "p3_final_status",
-    "p3_max_confirm", "p3_n_valid", "p3_invalidated_at", "p3_alert_ids", "msg",
+    "p3_max_confirm", "p3_n_valid", "p3_confirmed_at", "p3_invalidated_at",
+    "p3_max_adverse_pts", "p3_max_favorable_pts", "p3_alert_ids", "spot_src", "msg",
 ]
 
 
@@ -78,6 +79,34 @@ def csv_to_rows(text):
     return out
 
 
+def _num(x):
+    try:
+        v = float(x)
+        return v if v == v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _derive(rows):
+    """Self-healing columns, recomputed from the raw numbers every time:
+    * hit_5m/10m/15m  = did price move in the alert direction (price vs spot_at_alert)
+    * a missing spot_at_alert is taken from the linked Phase-3 row of the SAME alert
+      (recorded within a second of it) and marked spot_src = p3_setup."""
+    for r in rows.values():
+        if not _num(r.get("spot_at_alert")):
+            link = rows.get(r.get("p3_setup_id") or "")
+            if link and link is not r and _num(link.get("spot_at_alert")):
+                r["spot_at_alert"] = link["spot_at_alert"]
+                r["spot_src"] = "p3_setup"
+        sgn = {"BULLISH": 1, "BEARISH": -1}.get(r.get("direction"))
+        spot = _num(r.get("spot_at_alert"))
+        for h in ("5m", "10m", "15m"):
+            price = _num(r.get(f"price_{h}"))
+            if sgn is not None and spot is not None and price is not None:
+                r[f"hit_{h}"] = "True" if (price - spot) * sgn > 0 else "False"
+    return rows
+
+
 def merge_rows(remote_rows, local_rows):
     """Never drops a remote row. Local non-empty values win (they are newer)."""
     out = {k: dict(v) for k, v in remote_rows.items()}
@@ -89,7 +118,7 @@ def merge_rows(remote_rows, local_rows):
             for c in COLUMNS:
                 if r.get(c) not in ("", None):
                     cur[c] = r[c]
-    return out
+    return _derive(out)
 
 
 # ------------------------------------------------------------------- GitHub
