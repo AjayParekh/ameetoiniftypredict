@@ -202,17 +202,20 @@ def _p3_summary(evs):
     peak = max(pos, key=lambda x: STAGE_RANK[x]) if pos else None
     inval = next((e.get("ts") for e in evs if e.get("status") == "INVALIDATED"), None)
     confirmed = next((e.get("ts") for e in evs if e.get("stage") == "CONFIRMED REVERSAL CANDIDATE"), None)
+    closed = next((e.get("ts") for e in evs if e.get("status") not in (None, "ACTIVE")), None)
     ids = []
     for e in evs:
         for a in (e.get("alert_ids") or []):
             if a not in ids:
                 ids.append(a)
     last = evs[-1]
+    spot_conf = next((e.get("spot_confirm") for e in reversed(evs) if e.get("spot_confirm") is not None), None)
     return {"p3_peak_stage": peak, "p3_final_stage": last.get("stage"),
             "p3_final_status": last.get("status"),
             "p3_max_confirm": max((e.get("confirm") or 0) for e in evs),
             "p3_n_valid": max((e.get("n_valid") or 0) for e in evs),
-            "p3_invalidated_at": inval, "p3_confirmed_at": confirmed,
+            "p3_invalidated_at": inval, "p3_confirmed_at": confirmed, "p3_closed_at": closed,
+            "p3_spot_at_confirm": spot_conf, "p3_spot_at_close": last.get("spot_close"),
             "p3_max_adverse_pts": last.get("mae"), "p3_max_favorable_pts": last.get("mfe"),
             "p3_alert_ids": ";".join(ids)}
 
@@ -252,15 +255,20 @@ def load_log(path):
             rec[f"hit_{h}m"] = (None if (price is None or spot0 is None or sgn is None)
                                 else (price - spot0) * sgn > 0)
         by_id[aid] = rec
+    summs = {}
     for sid, evs in p3ev.items():
         if sid in by_id:
-            summ = _p3_summary(evs)
-            by_id[sid].update(summ)
+            summs[sid] = _p3_summary(evs)
+            by_id[sid].update(summs[sid])
             by_id[sid]["p3_setup_id"] = sid
-            for oid in [x for x in summ["p3_alert_ids"].split(";") if x]:
+            for oid in [x for x in summs[sid]["p3_alert_ids"].split(";") if x]:
                 if oid in by_id and oid != sid and not by_id[oid].get("p3_setup_id"):
-                    by_id[oid].update(summ)
+                    by_id[oid].update(summs[sid])
                     by_id[oid]["p3_setup_id"] = sid
+    for rec in by_id.values():                       # e.g. the "turned green" record of a setup
+        sid = rec.get("p3_setup_id")
+        if sid in summs and "p3_final_status" not in rec:
+            rec.update(summs[sid])
     return list(by_id.values()), bad
 
 
@@ -312,6 +320,8 @@ def sync_alerts(state, now, rev_alerts, snapshots, flip_dir, flip_since, flip_sc
             ts = _localize(datetime.strptime(a["ts"], "%Y-%m-%d %H:%M:%S"), now)
         except (KeyError, ValueError):
             continue
+        if not is_market_open(ts):          # pre-open / after-close prices are not real trading data
+            continue
         sp = spot_near(state["spot_buf"], ts)
         snap = _latest_snapshot_before(snapshots, ts)
         _log_alert(state, path, now, {
@@ -327,14 +337,15 @@ def sync_alerts(state, now, rev_alerts, snapshots, flip_dir, flip_since, flip_sc
         fid = f"{flip_since.strftime('%Y-%m-%d %H:%M:%S')}|flip_{flip_dir}"
         if fid not in state["seen_ids"]:
             state["seen_ids"].add(fid)
-            sp = spot_near(state["spot_buf"], flip_since)
-            _log_alert(state, path, now, {
-                "type": "alert", "id": fid, "ts": flip_since.isoformat(),
-                "source": "original_flip", "direction": flip_dir,
-                "spot_at_alert": sp["spot"] if sp else None,
-                "oi_flip_score": flip_score, "call_oi_change": None, "put_oi_change": None,
-                **_p2_fields(p2),
-                "data_reliable": report["reliable"], "msg": f"OI Flip {flip_dir}"})
+            if is_market_open(flip_since):
+                sp = spot_near(state["spot_buf"], flip_since)
+                _log_alert(state, path, now, {
+                    "type": "alert", "id": fid, "ts": flip_since.isoformat(),
+                    "source": "original_flip", "direction": flip_dir,
+                    "spot_at_alert": sp["spot"] if sp else None,
+                    "oi_flip_score": flip_score, "call_oi_change": None, "put_oi_change": None,
+                    **_p2_fields(p2),
+                    "data_reliable": report["reliable"], "msg": f"OI Flip {flip_dir}"})
 
 
 # ------------------------------------------------------------------ outcomes
@@ -912,7 +923,8 @@ def _p3_log_event(state, path, now, s):
                           "status": s["status"], "color": s["color"], "confirm": s["count"],
                           "n_valid": s["run_max"], "alert_ids": list(s["alert_ids"]),
                           "warnings": list(s["warnings"])[:4],
-                          "mae": round(s["mae"], 1), "mfe": round(s["mfe"], 1)})
+                          "mae": round(s["mae"], 1), "mfe": round(s["mfe"], 1),
+                          "spot_confirm": s.get("spot_at_confirm"), "spot_close": s.get("spot_at_close")})
 
 
 _CLOSE = {"INVALIDATED": ("INVALIDATED", "RED", "INVALIDATED — OPPOSITE PRICE MOVEMENT."),
@@ -931,6 +943,7 @@ def _p3_close(state, now, s, status, path):
     s["stage"], s["color"], s["label"] = _CLOSE[status]
     if status == "INVALIDATED":
         s["invalidated_at"] = now
+    s["spot_at_close"] = s.get("cur")
     if p3["active"].get(s["dir"]) == s["id"]:
         p3["active"][s["dir"]] = None
     _p3_log_event(state, path, now, s)
@@ -950,7 +963,8 @@ def _p3_start(state, now, direction, snap, score, an, cur, p2, path):
          "conflict": False, "opp_flag": False, "alert_ids": [], "max_confirm": 0,
          "count": 0, "evaluable": 0, "tests": [], "warnings": [], "inval_since": None,
          "closed_at": None, "invalidated_at": None, "confirmed_at": None, "losing": False,
-         "mae": 0.0, "mfe": 0.0, "label": "INITIAL DETECTION — OI reversal seen, awaiting price confirmation",
+         "mae": 0.0, "mfe": 0.0, "spot_at_confirm": None, "spot_at_close": None,
+         "label": "INITIAL DETECTION — OI reversal seen, awaiting price confirmation",
          "reason": "", "logged_key": None, "stale": False, "cur": cur, "adverse": 0.0}
     p3["setups"][sid] = s
     p3["order"].append(sid)
@@ -1027,7 +1041,15 @@ def _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path):
         _p3_link_alerts(s, rev_alerts)
         age = (now - s["start_ts"]).total_seconds()
         if age >= P3_WATCH_MIN * 60:                       # watch window over -> final verdict
-            _p3_close(state, now, s, "CONFIRMED" if s["confirmed_at"] else "EXPIRED", path)
+            d_ = 1 if s["dir"] == "BULLISH" else -1
+            pending = s["inval_since"] is not None         # a move against the alert was already building
+            if report["reliable"] and cur is not None:
+                s["cur"] = cur
+                mv_pts = d_ * (cur - s["start_spot"])
+                s["mfe"], s["mae"] = max(s["mfe"], mv_pts), max(s["mae"], -mv_pts)
+                pending = pending or (-mv_pts / s["start_spot"] * 100) >= P3_INVALID_PCT
+            _p3_close(state, now, s,
+                      "INVALIDATED" if pending else ("CONFIRMED" if s["confirmed_at"] else "EXPIRED"), path)
             continue
         if not report["reliable"] or cur is None:          # never confirm / invalidate on stale data
             s["stale"], s["color"] = True, "GREY"
@@ -1052,7 +1074,16 @@ def _p3_evaluate(state, now, report, p2, mv, candles, rev_alerts, path):
         else:
             s["inval_since"] = None
         if s["confirmed_at"] is None and s["count"] >= P3_CONFIRM_MIN and age >= P3_CONFIRM_MIN_AGE_SEC:
-            s["confirmed_at"] = now
+            s["confirmed_at"], s["spot_at_confirm"] = now, cur
+            # A separate record from the moment the setup turned GREEN: its 5/10/15-minute
+            # outcomes are the fair test of "what happens AFTER it turns green".
+            _log_alert(state, path, now, {
+                "type": "alert", "id": s["id"] + "#confirm", "ts": now.isoformat(),
+                "source": "p3_confirm", "direction": s["dir"], "spot_at_alert": cur,
+                "oi_flip_score": (p2 or {}).get("score"), "call_oi_change": s["ce"], "put_oi_change": s["pe"],
+                **_p2_fields(p2), "confirmation_status": "GREEN", "data_reliable": True,
+                "p3_setup_id": s["id"],
+                "msg": f"P3 {s['dir']} setup turned GREEN ({s['count']}/{s['evaluable']} price tests)"})
         near_invalid = adverse >= P3_INVALID_PCT * P3_WARN_ADVERSE_FRAC
         s["losing"] = bool(((s["max_confirm"] - s["count"]) >= P3_WEAKEN_DROP and s["max_confirm"] >= 2)
                            or near_invalid)
