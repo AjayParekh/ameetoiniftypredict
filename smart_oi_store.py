@@ -12,6 +12,7 @@ import csv
 import hashlib
 import io
 import threading
+from datetime import datetime
 
 import requests
 
@@ -25,8 +26,10 @@ COLUMNS = [
     "p2_label", "p2_price_dir", "p2_sideways", "p2_oi_bias", "data_reliable",
     "price_5m", "price_10m", "price_15m", "hit_5m", "hit_10m", "hit_15m",
     "p3_setup_id", "p3_peak_stage", "p3_final_stage", "p3_final_status",
-    "p3_max_confirm", "p3_n_valid", "p3_confirmed_at", "p3_invalidated_at",
-    "p3_max_adverse_pts", "p3_max_favorable_pts", "p3_alert_ids", "spot_src", "msg",
+    "p3_max_confirm", "p3_n_valid", "p3_confirmed_at", "p3_invalidated_at", "p3_closed_at",
+    "p3_min_to_confirm", "p3_min_to_close", "p3_spot_at_confirm", "p3_spot_at_close",
+    "p3_max_adverse_pts", "p3_max_favorable_pts", "p3_alert_ids", "spot_src",
+    "alert_vs_price", "alert_vs_flip", "msg",
 ]
 
 
@@ -87,11 +90,21 @@ def _num(x):
         return None
 
 
+def _minutes(a, b):
+    try:
+        return str(round((datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds() / 60, 1))
+    except (TypeError, ValueError):
+        return ""
+
+
 def _derive(rows):
-    """Self-healing columns, recomputed from the raw numbers every time:
+    """Self-healing / plain-language columns, recomputed from the raw numbers every time:
     * hit_5m/10m/15m  = did price move in the alert direction (price vs spot_at_alert)
     * a missing spot_at_alert is taken from the linked Phase-3 row of the SAME alert
-      (recorded within a second of it) and marked spot_src = p3_setup."""
+      (recorded within a second of it) and marked spot_src = p3_setup
+    * alert_vs_price  = was the alert WITH or AGAINST Nifty's recent price trend
+    * alert_vs_flip   = does the alert AGREE with or OPPOSE the OI Flip score
+    * p3_min_to_confirm / p3_min_to_close = minutes from this row's time to green / final verdict"""
     for r in rows.values():
         if not _num(r.get("spot_at_alert")):
             link = rows.get(r.get("p3_setup_id") or "")
@@ -104,6 +117,19 @@ def _derive(rows):
             price = _num(r.get(f"price_{h}"))
             if sgn is not None and spot is not None and price is not None:
                 r[f"hit_{h}"] = "True" if (price - spot) * sgn > 0 else "False"
+        pdir = r.get("p2_price_dir")
+        if sgn is not None and pdir in ("RISING", "FALLING"):
+            r["alert_vs_price"] = "WITH TREND" if ((sgn == 1) == (pdir == "RISING")) else "AGAINST TREND"
+        elif sgn is not None and pdir == "FLAT/MIXED":
+            r["alert_vs_price"] = "FLAT"
+        flip = _num(r.get("oi_flip_score"))
+        if sgn is not None and flip is not None:
+            r["alert_vs_flip"] = ("NEUTRAL" if abs(flip) < 5 else
+                                  ("AGREES" if (flip > 0) == (sgn == 1) else "OPPOSES"))
+        if r.get("p3_confirmed_at"):
+            r["p3_min_to_confirm"] = _minutes(r.get("ts"), r["p3_confirmed_at"])
+        if r.get("p3_closed_at"):
+            r["p3_min_to_close"] = _minutes(r.get("ts"), r["p3_closed_at"])
     return rows
 
 
