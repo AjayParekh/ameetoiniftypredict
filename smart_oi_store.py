@@ -29,7 +29,7 @@ COLUMNS = [
     "p3_max_confirm", "p3_n_valid", "p3_confirmed_at", "p3_invalidated_at", "p3_closed_at",
     "p3_min_to_confirm", "p3_min_to_close", "p3_spot_at_confirm", "p3_spot_at_close",
     "p3_max_adverse_pts", "p3_max_favorable_pts", "p3_alert_ids", "spot_src",
-    "alert_vs_price", "alert_vs_flip", "msg",
+    "alert_vs_price", "alert_vs_flip", "dup_of", "msg",
 ]
 
 
@@ -130,6 +130,20 @@ def _derive(rows):
             r["p3_min_to_confirm"] = _minutes(r.get("ts"), r["p3_confirmed_at"])
         if r.get("p3_closed_at"):
             r["p3_min_to_close"] = _minutes(r.get("ts"), r["p3_closed_at"])
+    # dup_of: the same event recorded twice by two browser tabs/sessions (same source+direction
+    # within 120 s). Rows are kept; filter dup_of = "" to count each event once.
+    last = {}
+    for r in sorted(rows.values(), key=lambda x: x.get("ts", "")):
+        r["dup_of"] = ""
+        if r.get("direction") not in ("BULLISH", "BEARISH") or not r.get("source"):
+            continue
+        k = (r["source"], r["direction"], (r.get("ts") or "")[:10])
+        prev = last.get(k)
+        gap = _minutes(prev["ts"], r["ts"]) if prev else ""
+        if gap != "" and 0 <= float(gap) <= 2.0:
+            r["dup_of"] = prev["id"]
+        else:
+            last[k] = r
     return rows
 
 
@@ -248,5 +262,123 @@ def sync(gh, now, cfg, records_fn, logged_count, background=True, force=False):
 
     if background:
         threading.Thread(target=work, daemon=True).start()
+    else:
+        work()
+
+
+# ------------------------------------------------- generic daily table (snapshots)
+def _table_to_csv(rows_by_id, columns):
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
+    w.writeheader()
+    for row in sorted(rows_by_id.values(), key=lambda r: (r.get("ts", ""), r.get("id", ""))):
+        w.writerow({c: row.get(c, "") for c in columns})
+    return "\ufeff" + buf.getvalue()
+
+
+def _csv_to_table(text, columns):
+    out = {}
+    for row in csv.DictReader(io.StringIO((text or "").lstrip("\ufeff"))):
+        if row.get("id"):
+            out[row["id"]] = {c: row.get(c, "") or "" for c in columns}
+    return out
+
+
+def _merge_table(remote, local_rows, columns):
+    """Never drops a remote row. Local non-empty values win."""
+    out = {k: dict(v) for k, v in remote.items()}
+    for r in local_rows:
+        cur = out.get(r["id"])
+        if cur is None:
+            out[r["id"]] = dict(r)
+        else:
+            for c in columns:
+                if r.get(c) not in ("", None):
+                    cur[c] = r[c]
+    return out
+
+
+def push_table(cfg, folder, suffix, date, local_rows, columns, gh):
+    """Returns (ok, error_text). Never raises."""
+    path = f"{folder}/{date}_{suffix}.csv"
+    key = f"{folder}:{date}"
+    try:
+        cache = gh["cache"].get(key)
+        if cache is None:
+            params = {"ref": cfg["branch"]} if cfg.get("branch") else None
+            r = _http_get(_url(cfg, path), _headers(cfg), params)
+            if r.status_code == 200:
+                j = r.json()
+                text = base64.b64decode(j.get("content", "")).decode("utf-8", errors="replace")
+                cache = {"rows": _csv_to_table(text, columns), "sha": j.get("sha")}
+            elif r.status_code == 404:
+                cache = {"rows": {}, "sha": None}
+            else:
+                return False, "read failed: " + _err(r)
+        merged = _merge_table(cache["rows"], local_rows, columns)
+        text = _table_to_csv(merged, columns)
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+        if gh["hashes"].get(key) == digest:
+            gh["cache"][key] = {"rows": merged, "sha": cache["sha"]}
+            return True, None
+        payload = {"message": f"nifty {folder} {date} ({len(merged)} rows)",
+                   "content": base64.b64encode(text.encode("utf-8")).decode("ascii")}
+        if cache["sha"]:
+            payload["sha"] = cache["sha"]
+        if cfg.get("branch"):
+            payload["branch"] = cfg["branch"]
+        r = _http_put(_url(cfg, path), _headers(cfg), payload)
+        if r.status_code in (200, 201):
+            gh["cache"][key] = {"rows": merged, "sha": ((r.json() or {}).get("content") or {}).get("sha")}
+            gh["hashes"][key] = digest
+            return True, None
+        if r.status_code in (409, 422):
+            gh["cache"].pop(key, None)
+        return False, "write failed: " + _err(r)
+    except Exception as e:
+        return False, f"{type(e).__name__}"
+
+
+def sync_table(gh, now, cfg, rows_fn, count, folder, suffix, columns, background=True, force=False):
+    """Same safety rules as sync(): throttled to 60 s, only when something new was recorded."""
+    if not cfg or not cfg.get("token") or not cfg.get("repo"):
+        gh["configured"] = False
+        return
+    gh["configured"] = True
+    if gh["busy"]:
+        return
+    if not force and gh["last_push"] is not None and \
+            (now - gh["last_push"]).total_seconds() < GH_MIN_INTERVAL_SEC:
+        return
+    if count == gh["pushed_logged"]:
+        return
+    rows = [r for r in rows_fn() if r.get("id") and r.get("ts")]
+    if not rows:
+        return
+    by_date = {}
+    for r in rows:
+        by_date.setdefault(r["ts"][:10], []).append(r)
+    gh["last_push"] = now
+    gh["busy"] = True
+
+    def work():
+        try:
+            all_ok, last_err = True, None
+            for date, drows in by_date.items():
+                ok, err = push_table(cfg, folder, suffix, date, drows, columns, gh)
+                if not ok:
+                    all_ok, last_err = False, err
+            if all_ok:
+                gh["last_ok"], gh["last_error"] = now, None
+                gh["pushes"] += 1
+                gh["pushed_logged"] = count
+            else:
+                gh["last_error"] = last_err
+        finally:
+            gh["busy"] = False
+
+    if background:
+        import threading as _t
+        _t.Thread(target=work, daemon=True).start()
     else:
         work()
