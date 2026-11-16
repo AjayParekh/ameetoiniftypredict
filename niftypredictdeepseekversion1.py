@@ -14,6 +14,7 @@ import json
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import smart_oi_layer as sol   # NEW: Phase 1 shadow layer (does not alter existing logic)
+import smart_oi_snapshots as snaps   # NEW: 5-minute market recorder (read-only)
 
 # --- Reversal Meter: optional Plotly import ---
 try:
@@ -1561,9 +1562,33 @@ def _gh_cfg():
     except Exception:
         return None
 
+def _snap_inputs(raw_spot, c_oi):
+    # NEW: read-only collection of data this app has ALREADY fetched (no extra API calls).
+    hist = st.session_state.get("rev_snapshots", [])
+    bs = ls = None
+    if len(hist) >= 3:
+        try:
+            _an, bs, ls = _p1_rev_scorer(hist)
+        except Exception:
+            bs = ls = None
+    return {
+        "spot": raw_spot, "prev_close": nifty_prev_close,
+        "oi_resp": upstoxOiResponse, "coi_resp": (c_oi if c_oi else upstoxOiChangeResponse),
+        "chain_resp": nifty_option_chain_response,
+        "fut_resp": fetched_data, "fut_score": nifty_macro_score,
+        "assets": [(d["s"]["name"], d["close"], d["pct"]) for d in final_display],
+        "india_vix": india_vix_value, "india_vix_pct": india_vix_pct, "us_vix": vix_value,
+        "gift_pct": gift_pct, "bnf_pct": sgx_pct,
+        "flip_score": (nifty_meter.get("score") if nifty_meter.get("available") else None),
+        "flip_state": nifty_meter.get("state"), "rev_bear": bs, "rev_bull": ls,
+        "entry": nifty_entry_signal, "exit": nifty_exit_signal, "gate": nifty_gate.get("verdict"),
+        "page_age_sec": (datetime.now(ist) - now).total_seconds(),
+    }
+
 def _p1_tick(p1, c_oi, err, raw_spot):
     try:
         now_ = datetime.now(ist)
+        _cfg = _gh_cfg()
         rep = sol.tick(p1, now_, spot_raw=raw_spot, change_oi_resp=c_oi,
                        change_oi_error=err,
                        rev_alerts=st.session_state.get("rev_alerts", []),
@@ -1574,7 +1599,8 @@ def _p1_tick(p1, c_oi, err, raw_spot):
                        score_hist=st.session_state.get("meter_hist_Nifty", []),
                        flip_thr=meter_flip_threshold,
                        rev_scorer=_p1_rev_scorer,      # NEW Phase 3
-                       gh_cfg=_gh_cfg())               # NEW permanent log
+                       gh_cfg=_cfg)                    # NEW permanent log
+        snaps.maybe_snapshot(p1, now_, lambda: _snap_inputs(raw_spot, c_oi), _cfg)   # NEW 5-min recorder
         with st.expander("🔄 Smart OI — Reversal Confirmation (Phase 3, shadow)", expanded=True):   # NEW Phase 3
             st.markdown(sol.phase3_html(p1, now_), unsafe_allow_html=True)
         with st.expander("🧠 Smart OI — Price Confirmation (Phase 2, shadow)", expanded=True):
