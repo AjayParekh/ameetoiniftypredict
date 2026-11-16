@@ -434,6 +434,15 @@ def freshness_html(report, state):
             gh_note = "☁️ GitHub log: connected — waiting for first alert to save"
     else:
         gh_note = "☁️ GitHub log: NOT configured — local log is temporary (lost on redeploy)"
+    sn = state.get("snap")
+    if sn:
+        miss = ", ".join(f"{k}×{v}" for k, v in sorted(sn["missing"].items(), key=lambda kv: -kv[1])[:6])
+        sgh = sn["gh"]
+        sg = ("saved ✔ " + sgh["last_ok"].strftime("%H:%M:%S")) if sgh.get("last_ok") else \
+             (f"⚠️ {sgh['last_error']}" if sgh.get("last_error") else "waiting for first save")
+        gh_note += (f"<br>📸 5-min market snapshots: {sn['count']} this session · last {sn['last'] or '—'} · GitHub {sg}"
+                    + (f" · missing fields: {miss}" if miss else "")
+                    + (f" · ⚠️ recorder error: {sn['last_error']}" if sn.get("last_error") else ""))
     log_note = (f"{gh_note}<br>Shadow log: {state['logged']} lines written · pending outcomes {len(state['pending'])}"
                 + (f" · ⚠️ log write errors {state['log_errors']}: {state['last_log_error']}"
                    if state["log_errors"] else ""))
@@ -931,7 +940,7 @@ _CLOSE = {"INVALIDATED": ("INVALIDATED", "RED", "INVALIDATED — OPPOSITE PRICE 
           "CONFIRMED": ("CONFIRMED REVERSAL CANDIDATE", "GREEN",
                         "CONFIRMED — price agreed with the alert within the watch window."),
           "FADED": ("REVERSAL LOSING STRENGTH", "ORANGE",
-                    "REVERSAL LOSING STRENGTH — confirmation faded before the window ended."),
+                    "GREEN, THEN PULLED BACK — price confirmed, then gave back part of the move (not necessarily wrong)."),
           "EXPIRED": ("EXPIRED", "NEUTRAL", "EXPIRED — no price confirmation within the watch window.")}
 
 
